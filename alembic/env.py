@@ -13,7 +13,7 @@ import backend.app.models.social_profile
 import backend.app.models.lead_source
 import backend.app.models.lead_event
 import backend.app.models.intent_signal
-import backend.app.models.campaign       # Must be imported before message!
+import backend.app.models.campaign
 import backend.app.models.campaign_lead
 import backend.app.models.message
 import backend.app.models.message_event
@@ -23,6 +23,12 @@ import backend.app.models.conversation
 import backend.app.models.appointment
 import backend.app.models.agent_run
 import backend.app.models.agent_decision
+
+# Chunk 4 models
+import backend.app.models.workflow
+import backend.app.models.workflow_trigger
+import backend.app.models.knowledge_document
+import backend.app.models.audit_log
 
 target_metadata = Base.metadata
 
