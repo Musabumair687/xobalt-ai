@@ -1,11 +1,21 @@
 from backend.app.database.session import Base
-import backend.app.models.lead  # Registers the Lead model with Base
+
+# Import all individual chunk 1 models
+import backend.app.models.organization
+import backend.app.models.user
+import backend.app.models.company
+import backend.app.models.person
+import backend.app.models.lead
+import backend.app.models.contact
+import backend.app.models.social_profile  
 from logging.config import fileConfig
+
 
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
 
 from alembic import context
+
 
 
 # this is the Alembic Config object, which provides
