@@ -1,13 +1,31 @@
 from backend.app.database.session import Base
 
-# Import all individual chunk 1 models
+# Chunk 1 models
 import backend.app.models.organization
 import backend.app.models.user
 import backend.app.models.company
 import backend.app.models.person
 import backend.app.models.lead
 import backend.app.models.contact
-import backend.app.models.social_profile  
+import backend.app.models.social_profile
+
+# Chunk 2 models
+import backend.app.models.lead_source
+import backend.app.models.lead_event
+import backend.app.models.intent_signal
+import backend.app.models.campaign       # Must be imported before message!
+import backend.app.models.campaign_lead
+import backend.app.models.message
+import backend.app.models.message_event
+
+# Chunk 3 models
+import backend.app.models.conversation
+import backend.app.models.appointment
+import backend.app.models.agent_run
+import backend.app.models.agent_decision
+
+target_metadata = Base.metadata
+
 from logging.config import fileConfig
 
 
@@ -88,3 +106,5 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
+
+
