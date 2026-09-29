@@ -1,17 +1,27 @@
+import uuid
 from datetime import datetime
-from typing import Optional
-from sqlalchemy import String, Integer, DateTime, ForeignKey, JSON
-from sqlalchemy.orm import Mapped, mapped_column
-from backend.app.database.session import Base
+from typing import Optional, Dict, Any
+
+from sqlalchemy import String, Text, DateTime, ForeignKey, JSON
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.sql import func
+
+from app.database.base import Base
 
 class LeadEvent(Base):
+    """Represents an event associated with a lead."""
+    
     __tablename__ = "lead_events"
+    
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    lead_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("leads.id"), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    event_data: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    triggered_by: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    lead_id: Mapped[int] = mapped_column(Integer, ForeignKey("leads.id", ondelete="CASCADE"), nullable=False)
-    
-    event_type: Mapped[str] = mapped_column(String(100), nullable=False)  # e.g., 'status_changed', 'enriched'
-    description: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    payload: Mapped[Optional[dict]] = mapped_column(JSON, default=dict)
-    
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # Relationships
+    lead: Mapped["Lead"] = relationship("Lead", back_populates="events")

@@ -1,16 +1,24 @@
+import uuid
 from datetime import datetime
-from typing import Optional
-from sqlalchemy import String, Integer, DateTime, ForeignKey, JSON
-from sqlalchemy.orm import Mapped, mapped_column
-from backend.app.database.session import Base
+from typing import Optional, Any
+from sqlalchemy import String, DateTime, ForeignKey, JSON
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.sql import func
+from app.database.base import Base
 
 class MessageEvent(Base):
+    """
+    MessageEvent model tracking delivery, opens, clicks, etc.
+    """
     __tablename__ = "message_events"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    message_id: Mapped[int] = mapped_column(Integer, ForeignKey("messages.id", ondelete="CASCADE"), nullable=False)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    message_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("messages.id", ondelete="CASCADE"), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(50))
+    event_data: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now())
 
-    event_type: Mapped[str] = mapped_column(String(50), nullable=False)  # sent, opened, clicked, bounced, replied
-    payload: Mapped[Optional[dict]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    message: Mapped["Message"] = relationship(back_populates="events")

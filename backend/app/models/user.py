@@ -1,22 +1,26 @@
+import uuid
 from datetime import datetime
-from typing import Optional
-from sqlalchemy import String, Integer, DateTime, ForeignKey, Boolean
+from typing import List, Optional
+from sqlalchemy import String, Boolean, Text, DateTime, ForeignKey, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from backend.app.database.session import Base
+from app.database.base import Base
 
 class User(Base):
-    __tablename__ = "users"
+    """User model representing a platform user."""
+    __tablename__ = 'users'
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    organization_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True)
-    
-    email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('organizations.id', ondelete='CASCADE'), nullable=False)
+    email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False)
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(50), default='member')
+    hashed_password: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     # Relationships
-    organization: Mapped[Optional["Organization"]] = relationship("Organization", back_populates="users")
+    organization: Mapped["Organization"] = relationship("Organization", back_populates="users")
+    created_campaigns: Mapped[List["Campaign"]] = relationship("Campaign", back_populates="created_by")

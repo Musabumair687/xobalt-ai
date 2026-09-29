@@ -1,18 +1,25 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, DeclarativeBase
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from app.config import get_settings
+from app.database.base import Base
 
-# Force SQLAlchemy to use the installed psycopg2 driver
-DATABASE_URL = "postgresql+psycopg2://xobalt_user:xobalt_password@localhost:5432/xobalt_db"
+settings = get_settings()
 
-engine = create_engine(DATABASE_URL, echo=True)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+async_engine = create_async_engine(
+    settings.DATABASE_URL,
+    pool_size=20,
+    max_overflow=10,
+    pool_pre_ping=True,
+    echo=settings.DEBUG
+)
 
-class Base(DeclarativeBase):
-    pass
+AsyncSessionLocal = async_sessionmaker(
+    bind=async_engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+    autocommit=False,
+    autoflush=False
+)
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+async def init_db() -> None:
+    async with async_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
