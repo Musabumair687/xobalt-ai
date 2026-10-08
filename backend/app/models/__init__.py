@@ -22,6 +22,9 @@ from app.models.agent_decision import AgentDecision
 from app.models.audit_log import AuditLog
 from app.models.usage import UsageRecord
 from app.models.billing import BillingRecord
+from app.models.website import Website
+from app.models.website_page import WebsitePage
+from app.models.company_intelligence import CompanyIntelligence
 
 __all__ = [
     "Base",
@@ -46,5 +49,8 @@ __all__ = [
     "AgentDecision",
     "AuditLog",
     "UsageRecord",
-    "BillingRecord"
+    "BillingRecord",
+    "Website",
+    "WebsitePage",
+    "CompanyIntelligence"
 ]
