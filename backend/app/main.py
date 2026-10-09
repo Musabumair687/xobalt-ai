@@ -36,6 +36,9 @@ app.include_router(website_router, prefix="/api/v1")
 from app.api.scoring import router as scoring_router
 app.include_router(scoring_router, prefix="/api/v1")
 
+from app.api.personalization import router as personalization_router
+app.include_router(personalization_router, prefix="/api/v1")
+
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "app": settings.APP_NAME, "version": "0.4.0"}

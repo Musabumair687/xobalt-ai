@@ -44,7 +44,7 @@ class IntentSignalService:
             lead_id=lead_id,
             signal_type=signal_type,
             description=description,
-            evidence=evidence,
+            raw_data={"evidence": evidence},
             confidence=confidence,
             source=source
         )
