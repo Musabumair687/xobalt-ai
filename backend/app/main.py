@@ -42,6 +42,12 @@ app.include_router(personalization_router, prefix="/api/v1")
 from app.api.campaigns import router as campaigns_router
 app.include_router(campaigns_router, prefix="/api/v1")
 
+from app.api.conversations import router as conversations_router
+app.include_router(conversations_router, prefix="/api/v1")
+
+from app.api.appointments import router as appointments_router
+app.include_router(appointments_router, prefix="/api/v1")
+
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "app": settings.APP_NAME, "version": "0.4.0"}
