@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+@theme {
+  --color-background: var(--background-color);
+  --color-card: var(--card-color);
+  --color-sidebar: var(--sidebar-color);
+  --color-textPrimary: var(--text-primary-color);
+  --color-textSecondary: var(--text-secondary-color);
+  --color-accent: var(--accent-color);
+  --color-accentLight: var(--accent-light-color);
+  --color-borderLine: var(--border-color);
+  --color-success: var(--success-color);
+  --color-warning: var(--warning-color);
+  --color-danger: var(--danger-color);
+}
+
+@layer base {
+  :root {
+    /* Jobgio-inspired Light Theme (Monochrome, airy) */
+    --background-color: #F4F5F7;
+    --card-color: #FFFFFF;
+    --sidebar-color: #FFFFFF;
+    --text-primary-color: #000000;
+    --text-secondary-color: #8A8A8E;
+    --accent-color: #1A1A1A; /* Solid black for active buttons/pills */
+    --accent-light-color: #F3F4F6;
+    --border-color: #E5E7EB;
+    --success-color: #10B981;
+    --warning-color: #F59E0B;
+    --danger-color: #EF4444;
+  }
+
+  .dark {
+    /* Jobgio-inspired Dark Theme (Inverted monochrome) */
+    --background-color: #09090B;
+    --card-color: #18181B;
+    --sidebar-color: #18181B;
+    --text-primary-color: #FAFAFA;
+    --text-secondary-color: #A1A1AA;
+    --accent-color: #FFFFFF; /* Solid white for active buttons/pills in dark mode */
+    --accent-light-color: #27272A;
+    --border-color: #27272A;
+    --success-color: #10B981;
+    --warning-color: #F59E0B;
+    --danger-color: #EF4444;
+  }
+
+  body {
+    background-color: var(--background-color);
+    color: var(--text-primary-color);
+    transition: background-color 0.3s ease, color 0.3s ease;
+  }
+}
