@@ -32,9 +32,30 @@ class DiscoveryService:
     """Coordinate company discovery across one or more LeadSource providers."""
 
     def __init__(self, sources: list[LeadSource] | None = None) -> None:
-        # Default: use SearchSource in mock mode.
-        # Real providers are injected in production via DI / config.
-        self._sources: list[LeadSource] = sources or [SearchSource()]
+        if sources is not None:
+            self._sources = sources
+            return
+
+        from app.config import get_settings
+        settings = get_settings()
+
+        resolved_sources: list[LeadSource] = []
+
+        if settings.SERPAPI_API_KEY:
+            resolved_sources.append(SearchSource(api_key=settings.SERPAPI_API_KEY, provider="serpapi"))
+
+        if settings.TAVILY_API_KEY:
+            resolved_sources.append(SearchSource(api_key=settings.TAVILY_API_KEY, provider="tavily"))
+
+        if settings.DISCOVERY_PROVIDER in ("duckduckgo", "ddg"):
+            from app.integrations.sources.duckduckgo_source import DuckDuckGoSource
+            resolved_sources.append(DuckDuckGoSource())
+
+        if not resolved_sources:
+            # Default fallback for testing and development
+            resolved_sources = [SearchSource()]
+
+        self._sources = resolved_sources
 
     async def search(self, criteria: HunterCriteria) -> list[DiscoveredCompany]:
         """Search all configured sources and return deduplicated candidates.

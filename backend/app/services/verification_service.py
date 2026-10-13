@@ -63,8 +63,21 @@ class VerificationService:
     """Application-level facade for contact verification."""
 
     def __init__(self, provider: VerificationProvider | None = None) -> None:
-        # Default to mock; real provider injected via DI / config in Phase 4+.
-        self._provider: VerificationProvider = provider or MockVerificationProvider()
+        if provider is not None:
+            self._provider = provider
+            return
+
+        from app.config import get_settings
+        settings = get_settings()
+
+        if settings.HUNTER_API_KEY and settings.VERIFICATION_PROVIDER in ("auto", "hunter"):
+            from app.integrations.verification.hunter_verifier import HunterVerificationProvider
+            self._provider = HunterVerificationProvider(api_key=settings.HUNTER_API_KEY)
+        elif settings.VERIFICATION_PROVIDER == "dns":
+            from app.integrations.verification.dns_verifier import DnsVerificationProvider
+            self._provider = DnsVerificationProvider()
+        else:
+            self._provider = MockVerificationProvider()
 
     async def verify_email(self, email: str) -> VerificationResult:
         """Verify a single email address.

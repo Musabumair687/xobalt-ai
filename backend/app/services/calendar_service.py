@@ -11,7 +11,17 @@ logger = logging.getLogger(__name__)
 
 class CalendarService:
     def __init__(self, provider: Optional[CalendarProvider] = None):
-        self.provider = provider or GoogleCalendarProvider()
+        if provider is not None:
+            self.provider = provider
+            return
+
+        from app.config import get_settings
+        settings = get_settings()
+        self.provider = GoogleCalendarProvider(
+            refresh_token=settings.GOOGLE_CALENDAR_REFRESH_TOKEN,
+            client_id=settings.GOOGLE_CALENDAR_CLIENT_ID,
+            client_secret=settings.GOOGLE_CALENDAR_CLIENT_SECRET,
+        )
         
     async def get_availability(self, calendar_id: str, start_time: datetime, end_time: datetime) -> List[TimeSlot]:
         """Get busy times."""

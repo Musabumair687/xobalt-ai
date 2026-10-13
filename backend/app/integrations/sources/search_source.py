@@ -30,30 +30,41 @@ class SearchSource(LeadSource):
 
     def __init__(self, api_key: str = "", provider: str = "mock") -> None:
         self._api_key = api_key
-        self._provider = provider
+        self._provider = provider.lower()
+        self._delegate: LeadSource | None = None
+
+        if self._provider in ("serp", "serpapi"):
+            from app.integrations.sources.serpapi_source import SerpApiSource
+            self._delegate = SerpApiSource(api_key=api_key)
+        elif self._provider == "tavily":
+            from app.integrations.sources.tavily_source import TavilySource
+            self._delegate = TavilySource(api_key=api_key)
+        elif self._provider in ("duckduckgo", "ddg"):
+            from app.integrations.sources.duckduckgo_source import DuckDuckGoSource
+            self._delegate = DuckDuckGoSource()
 
     @property
     def name(self) -> str:
         return f"search_source:{self._provider}"
 
     async def is_available(self) -> bool:
+        if self._delegate:
+            return await self._delegate.is_available()
         if self._provider == "mock":
             return True
         return bool(self._api_key)
 
     async def search(self, criteria: HunterCriteria) -> list[DiscoveredCompany]:
-        """Discover companies matching *criteria*.
+        """Discover companies matching *criteria*."""
+        if self._delegate:
+            return await self._delegate.search(criteria)
 
-        In mock mode returns an empty list so the workflow can be exercised
-        end-to-end in tests without network calls.
-        """
         if self._provider == "mock":
             logger.debug("SearchSource running in mock mode – returning empty results.")
             return []
 
-        # TODO: plug in real provider adapter (Phase 4 Website Intelligence)
         logger.warning(
-            "SearchSource: provider '%s' not yet implemented. Returning empty list.",
+            "SearchSource: provider '%s' not supported. Returning empty list.",
             self._provider,
         )
         return []

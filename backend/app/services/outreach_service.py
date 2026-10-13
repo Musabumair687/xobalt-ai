@@ -9,9 +9,13 @@ from app.integrations.email.base import EmailProvider
 logger = logging.getLogger(__name__)
 
 class OutreachService:
-    def __init__(self, db: AsyncSession, email_provider: EmailProvider):
+    def __init__(self, db: AsyncSession, email_provider: EmailProvider | None = None):
         self.db = db
-        self.provider = email_provider
+        if email_provider is None:
+            from app.integrations.email import get_email_provider
+            self.provider = get_email_provider()
+        else:
+            self.provider = email_provider
         
     async def send_message(self, message: Message, to_email: str) -> str:
         """Execute the send via the configured provider."""

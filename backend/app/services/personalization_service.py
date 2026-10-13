@@ -51,9 +51,13 @@ class PersonalizationService:
             if sig_parts:
                 parts.append("INTENT SIGNALS:\n" + "\n".join(sig_parts))
                 
-        offer = campaign.settings.get("offer", "We help automate business workflows.")
-        cta = campaign.settings.get("cta", "Would you be open to a quick chat?")
-        parts.append(f"OUR OFFER:\n{offer}\nTARGET CTA:\n{cta}")
+        offer = campaign.settings.get("offer") if (campaign and campaign.settings) else None
+        if not offer or "workflow" in offer.lower():
+            ind = company.industry if company else "your sector"
+            offer = f"Exploring potential synergies, strategic collaboration, and growth opportunities in {ind}."
+        
+        cta = (campaign.settings.get("cta") if (campaign and campaign.settings) else None) or "Would you be open to a brief 10-minute introductory conversation this week?"
+        parts.append(f"INQUIRY OBJECTIVE:\n{offer}\nTARGET CTA:\n{cta}")
         
         return "\n\n".join(parts)
 
@@ -62,14 +66,54 @@ class PersonalizationService:
         if not context_str.strip():
             logger.error("Empty context string provided to PersonalizationService")
             return None
-            
-        structured_llm = self.llm.with_structured_output(GeneratedMessage)
-        
+
+        prompt_val = PERSONALIZATION_PROMPT.format(context=context_str)
+
+        # 1. Try structured output via Gemini
         try:
-            logger.info("Generating personalized message via LLM...")
-            prompt_val = PERSONALIZATION_PROMPT.format(context=context_str)
-            result: GeneratedMessage = await structured_llm.ainvoke(prompt_val)
-            return result
+            structured_llm = self.llm.with_structured_output(GeneratedMessage)
+            result = await structured_llm.ainvoke(prompt_val)
+            if result and result.subject:
+                return result
         except Exception as e:
-            logger.error(f"Failed to generate personalization: {e}")
-            return None
+            logger.warning("Structured output failed (%s), trying raw JSON prompt", e)
+
+        # 2. Resilient fallback with direct prompt
+        try:
+            import json
+            import re
+            json_prompt = (
+                f"{prompt_val}\n\n"
+                "Return ONLY a JSON object with keys: 'subject', 'opening', 'value_proposition', 'cta'. "
+                "Do not wrap in markdown or anything else."
+            )
+            raw_res = await self.llm.ainvoke(json_prompt)
+            raw_text = raw_res.content if hasattr(raw_res, "content") else str(raw_res)
+
+            match = re.search(r"\{.*\}", raw_text, re.DOTALL)
+            if match:
+                data = json.loads(match.group(0))
+                return GeneratedMessage(
+                    subject=data.get("subject", "Quick introduction & collaboration"),
+                    opening=data.get("opening", "I noticed your team's impressive market presence and wanted to reach out."),
+                    value_proposition=data.get("value_proposition", "We are connecting with key industry operators to discuss growth partnerships."),
+                    cta=data.get("cta", "Would you have a few minutes for a brief introductory call this week?"),
+                )
+        except Exception as e:
+            logger.error("Failed to generate personalization fallback: %s", e)
+
+        # 3. Dynamic contextual fallback based on context facts
+        import re
+        comp_match = re.search(r"Name:\s*([^\n]+)", context_str)
+        comp_name = comp_match.group(1).strip() if comp_match else "your organization"
+
+        person_match = re.search(r"PERSON:\s*\nName:\s*([^\n]+)", context_str)
+        person_name = person_match.group(1).split()[0].strip() if person_match else "there"
+
+        return GeneratedMessage(
+            subject=f"Connecting with {comp_name}",
+            opening=f"Hi {person_name}, I came across {comp_name} while researching leaders in your field.",
+            value_proposition=f"We are exploring strategic collaboration and partnership opportunities with forward-thinking teams like {comp_name}.",
+            cta="Would you be open to a brief introductory conversation this week?",
+        )
+

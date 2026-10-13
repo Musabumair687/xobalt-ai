@@ -41,8 +41,8 @@ def build_personalization_graph(
     graph.add_edge("build_personalization_context", "generate_message")
     graph.add_edge("generate_message", "validate_message")
     
-    # Conditional branching: if generation/validation failed hard, still store as draft
-    graph.add_edge("validate_message", "store_message")
+    # Always attempt to persist the result.
+    # store_message handles missing lead/campaign and defaults to draft status.    graph.add_edge("validate_message", "store_message")
     
     graph.add_edge("store_message", END)
     

@@ -66,8 +66,21 @@ class EnrichmentService:
     """Application-level facade for company enrichment and people discovery."""
 
     def __init__(self, provider: EnrichmentProvider | None = None) -> None:
-        # Default to mock provider; real provider injected via DI / config.
-        self._provider: EnrichmentProvider = provider or MockEnrichmentProvider()
+        if provider is not None:
+            self._provider = provider
+            return
+
+        from app.config import get_settings
+        settings = get_settings()
+
+        if settings.APOLLO_API_KEY and settings.ENRICHMENT_PROVIDER in ("auto", "apollo"):
+            from app.integrations.enrichment.apollo import ApolloEnrichmentProvider
+            self._provider = ApolloEnrichmentProvider(api_key=settings.APOLLO_API_KEY)
+        elif settings.HUNTER_API_KEY and settings.ENRICHMENT_PROVIDER in ("auto", "hunter"):
+            from app.integrations.enrichment.hunter_enrichment import HunterEnrichmentProvider
+            self._provider = HunterEnrichmentProvider(api_key=settings.HUNTER_API_KEY)
+        else:
+            self._provider = MockEnrichmentProvider()
 
     async def enrich_company(self, company: DiscoveredCompany) -> DiscoveredCompany:
         """Enrich a company with data from the configured provider.

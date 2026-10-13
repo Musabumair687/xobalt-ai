@@ -33,13 +33,13 @@ def get_llm():
         except ImportError:
             raise RuntimeError("langchain-groq not installed or API key missing.")
     elif settings.LLM_PROVIDER == "gemini":
-        try:
-            from langchain_google_genai import ChatGoogleGenerativeAI
-            return ChatGoogleGenerativeAI(google_api_key=settings.GEMINI_API_KEY, model=settings.GEMINI_MODEL)
-        except ImportError:
-            raise RuntimeError("langchain-google-genai not installed or API key missing.")
+        if not settings.GEMINI_API_KEY:
+            raise RuntimeError("GEMINI_API_KEY is not configured in .env.")
+        from app.services.gemini_direct_client import GeminiDirectClient
+        return GeminiDirectClient(api_key=settings.GEMINI_API_KEY, model=settings.GEMINI_MODEL)
     else:
-         raise ValueError(f"Unknown LLM provider: {settings.LLM_PROVIDER}")
+        raise ValueError(f"Unknown LLM provider: {settings.LLM_PROVIDER}")
+
 
 
 @router.post(
