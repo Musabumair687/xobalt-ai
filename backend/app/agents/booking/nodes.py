@@ -49,7 +49,7 @@ async def check_availability(state: BookingState, booking_svc: BookingService) -
     req = state.get("availability_request")
     if not req: return {"errors": ["Missing availability_request"]}
     
-    calendar_id = "default"  # Normally we lookup the org's calendar
+    calendar_id = state.get("calendar_id", "primary")
     slots = await booking_svc.get_available_slots(req, calendar_id)
     
     return {"available_slots": slots}

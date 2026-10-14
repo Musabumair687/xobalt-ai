@@ -11,6 +11,7 @@ class BookingState(TypedDict, total=False):
     # Inputs
     conversation_id: uuid.UUID
     action: str  # "get_availability" or "book_slot"
+    calendar_id: str
     
     # DB Models
     conversation: Optional[Conversation]

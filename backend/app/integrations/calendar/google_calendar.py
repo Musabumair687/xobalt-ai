@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import httpx
 
 from app.integrations.calendar.base import CalendarProvider
+from app.integrations.provider_errors import ProviderConfigurationError
 from app.schemas.calendar import TimeSlot, CalendarEvent
 
 logger = logging.getLogger(__name__)
@@ -15,8 +16,8 @@ logger = logging.getLogger(__name__)
 class GoogleCalendarProvider(CalendarProvider):
     """Google Calendar Provider.
     
-    If OAuth refresh token / access token is provided, makes live calls to Google Calendar REST API.
-    Otherwise gracefully falls back to simulation mode for development and local testing.
+    Live calls require OAuth credentials. Simulation is available only when
+    the service explicitly selects mock mode.
     """
 
     def __init__(
@@ -25,11 +26,13 @@ class GoogleCalendarProvider(CalendarProvider):
         refresh_token: str = "",
         client_id: str = "",
         client_secret: str = "",
+        simulation: bool = False,
     ) -> None:
         self.access_token = access_token
         self.refresh_token = refresh_token
         self.client_id = client_id
         self.client_secret = client_secret
+        self.simulation = simulation
         self._api_base = "https://www.googleapis.com/calendar/v3"
 
     @property
@@ -53,10 +56,26 @@ class GoogleCalendarProvider(CalendarProvider):
                     )
                     if res.status_code == 200:
                         self.access_token = res.json().get("access_token", "")
-                        return self.access_token
-            except Exception as e:
-                logger.error("Failed to refresh Google Calendar OAuth token: %s", e)
-        return ""
+                        if self.access_token:
+                            return self.access_token
+                    raise RuntimeError(
+                        f"Google OAuth token refresh failed with HTTP {res.status_code}."
+                    )
+            except Exception as exc:
+                if self.simulation:
+                    logger.warning(
+                        "Google Calendar token refresh failed in mock mode (%s).",
+                        type(exc).__name__,
+                    )
+                else:
+                    raise RuntimeError(
+                        f"Google OAuth token refresh failed ({type(exc).__name__})."
+                    ) from exc
+        if self.simulation:
+            return ""
+        raise ProviderConfigurationError(
+            "Google Calendar requires a valid OAuth refresh token, client ID, and client secret."
+        )
 
     async def get_busy_slots(self, calendar_id: str, start_time: datetime, end_time: datetime) -> List[TimeSlot]:
         token = await self._ensure_access_token()
@@ -83,8 +102,20 @@ class GoogleCalendarProvider(CalendarProvider):
                                 )
                             )
                         return slots
-            except Exception as e:
-                logger.warning("Google Calendar freeBusy API failed, falling back: %s", e)
+            except Exception as exc:
+                if not self.simulation:
+                    raise RuntimeError(
+                        f"Google Calendar availability request failed ({type(exc).__name__})."
+                    ) from exc
+                logger.warning(
+                    "Google Calendar availability failed in mock mode (%s).",
+                    type(exc).__name__,
+                )
+            else:
+                if not self.simulation:
+                    raise RuntimeError(
+                        f"Google Calendar availability request failed with HTTP {res.status_code}."
+                    )
 
         # Simulation fallback
         busy = []
@@ -142,8 +173,20 @@ class GoogleCalendarProvider(CalendarProvider):
                             meeting_link=meet_link,
                             status="confirmed",
                         )
-            except Exception as e:
-                logger.warning("Google Calendar create event API failed, falling back: %s", e)
+            except Exception as exc:
+                if not self.simulation:
+                    raise RuntimeError(
+                        f"Google Calendar event creation failed ({type(exc).__name__})."
+                    ) from exc
+                logger.warning(
+                    "Google Calendar event creation failed in mock mode (%s).",
+                    type(exc).__name__,
+                )
+            else:
+                if not self.simulation:
+                    raise RuntimeError(
+                        f"Google Calendar event creation failed with HTTP {res.status_code}."
+                    )
 
         event_id = f"gcal_{uuid.uuid4().hex[:12]}"
         return CalendarEvent(
@@ -163,6 +206,19 @@ class GoogleCalendarProvider(CalendarProvider):
                 async with httpx.AsyncClient(timeout=10.0) as client:
                     res = await client.delete(url, headers={"Authorization": f"Bearer {token}"})
                     return res.status_code in (200, 204)
-            except Exception as e:
-                logger.warning("Google Calendar delete event failed: %s", e)
-        return True
+            except Exception as exc:
+                if not self.simulation:
+                    raise RuntimeError(
+                        f"Google Calendar event cancellation failed ({type(exc).__name__})."
+                    ) from exc
+                logger.warning(
+                    "Google Calendar event cancellation failed in mock mode (%s).",
+                    type(exc).__name__,
+                )
+            else:
+                if not self.simulation and res.status_code not in (200, 204):
+                    raise RuntimeError(
+                        f"Google Calendar event cancellation failed with HTTP {res.status_code}."
+                    )
+                return res.status_code in (200, 204)
+        return self.simulation

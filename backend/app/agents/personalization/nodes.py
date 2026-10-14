@@ -123,6 +123,8 @@ async def store_message(state: PersonalizationState, db: AsyncSession) -> dict:
         
     # We still save it even if invalid, so human can see and fix it, or we see why it failed.
     msg_data = state.get("generated_message")
+    if not msg_data:
+        return {}
     
     if msg_data:
         full_body = f"Hi {state.get('person').first_name if state.get('person') else 'there'},\n\n"

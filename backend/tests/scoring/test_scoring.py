@@ -33,6 +33,7 @@ def test_calculate_industry_score():
     # Missing industry
     res = service.calculate_industry_score(Company())
     assert res.score == 0
+    assert service.calculate_industry_score(None).score == 0
 
 def test_calculate_size_score():
     service = ScoringService()
@@ -44,6 +45,13 @@ def test_calculate_size_score():
     c_huge = Company(employee_count=5000)
     res = service.calculate_size_score(c_huge)
     assert res.score == 0
+
+    assert service.calculate_size_score(Company(employee_count=9)).score == 0
+    assert service.calculate_size_score(Company(employee_count=10)).score == 15
+    assert service.calculate_size_score(Company(employee_count=100)).score == 15
+    assert service.calculate_size_score(Company(employee_count=101)).score == 0
+    assert service.calculate_size_score(Company()).score == 0
+    assert service.calculate_size_score(None).score == 0
 
 def test_calculate_decision_maker_score():
     service = ScoringService()

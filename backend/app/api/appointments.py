@@ -1,11 +1,19 @@
 """API router for Appointments & Booking."""
 
 import logging
-from fastapi import APIRouter, Depends, status
+import uuid
+from typing import Annotated
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database.dependencies import get_db
 from app.workers.calendar_worker import CalendarWorker
 from app.schemas.calendar import AvailabilityRequest, BookingRequest
+from app.models.conversation import Conversation
+from app.models.user import User
+from app.auth import get_current_user
+from app.schemas.common import PaginatedResponse
+from app.schemas.contracts import AppointmentListItem
+from app.services.integration_settings_service import organization_settings_scope
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/calendar", tags=["Calendar & Appointments"])
@@ -13,9 +21,11 @@ router = APIRouter(prefix="/calendar", tags=["Calendar & Appointments"])
 @router.post("/availability", status_code=status.HTTP_200_OK)
 async def get_availability(
     request: AvailabilityRequest,
-    conversation_id: str,
+    conversation_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
+    await _require_owned_conversation(db, conversation_id, current_user.organization_id)
     worker = CalendarWorker(db)
     state = {
         "conversation_id": conversation_id,
@@ -23,15 +33,27 @@ async def get_availability(
         "availability_request": request,
         "errors": []
     }
-    result = await worker.run_booking_workflow(state)
+    async with organization_settings_scope(db, current_user.organization_id):
+        result = await worker.run_booking_workflow(state)
     return {"available_slots": [s.model_dump() for s in result.get("available_slots", [])]}
 
 @router.post("/book", status_code=status.HTTP_200_OK)
 async def book_slot(
     request: BookingRequest,
-    conversation_id: str,
+    conversation_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
+    conversation = await _require_owned_conversation(
+        db,
+        conversation_id,
+        current_user.organization_id,
+    )
+    if (
+        request.organization_id != current_user.organization_id
+        or request.lead_id != conversation.lead_id
+    ):
+        raise HTTPException(status_code=404, detail="Conversation not found")
     worker = CalendarWorker(db)
     state = {
         "conversation_id": conversation_id,
@@ -39,43 +61,95 @@ async def book_slot(
         "booking_request": request,
         "errors": []
     }
-    result = await worker.run_booking_workflow(state)
+    async with organization_settings_scope(db, current_user.organization_id):
+        result = await worker.run_booking_workflow(state)
     return result.get("booking_result", {"success": False, "error": "Unknown error"})
 
 from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
-from sqlalchemy import select, desc
-from sqlalchemy.orm import selectinload
+from sqlalchemy import select, desc, func
+from sqlalchemy.orm import selectinload, with_loader_criteria
 from app.models.appointment import Appointment
 from app.models.lead import Lead
 from app.models.company import Company
 from app.models.person import Person
-from app.models.organization import Organization
+from sqlalchemy.orm import selectinload
+
+
+async def _require_owned_conversation(
+    db: AsyncSession,
+    conversation_id: uuid.UUID,
+    organization_id: uuid.UUID,
+) -> Conversation:
+    result = await db.execute(
+        select(Conversation)
+        .options(selectinload(Conversation.lead))
+        .where(
+            Conversation.id == conversation_id,
+            Conversation.organization_id == organization_id,
+        )
+    )
+    conversation = result.scalars().first()
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return conversation
 
 class CreateAppointmentDirectRequest(BaseModel):
-    title: str = Field(default="Strategy & Demo Call")
-    lead_id: Optional[str] = None
-    attendee_name: Optional[str] = None
-    attendee_email: Optional[str] = None
-    company_name: Optional[str] = None
+    title: str = Field(default="Strategy & Demo Call", min_length=1, max_length=500)
+    lead_id: Optional[uuid.UUID] = None
+    attendee_name: Optional[str] = Field(default=None, max_length=255)
+    attendee_email: Optional[str] = Field(
+        default=None,
+        max_length=320,
+        pattern=r"^[^\s@]+@[^\s@]+\.[^\s@]+$",
+    )
+    company_name: Optional[str] = Field(default=None, max_length=255)
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
-    meeting_link: Optional[str] = Field(default="https://meet.google.com/xob-live-rev")
-    notes: Optional[str] = None
+    meeting_link: Optional[str] = Field(default=None, max_length=2048)
+    notes: Optional[str] = Field(default=None, max_length=10000)
 
-@router.get("/appointments", summary="List all scheduled appointments")
-async def list_appointments(db: AsyncSession = Depends(get_db)):
-    """Fetch all meetings/appointments with lead and attendee metadata."""
+@router.get(
+    "/appointments",
+    response_model=PaginatedResponse[AppointmentListItem],
+    summary="List scheduled appointments",
+)
+async def list_appointments(
+    current_user: User = Depends(get_current_user),
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    db: AsyncSession = Depends(get_db),
+):
+    """Fetch one page of meetings/appointments with lead and attendee metadata."""
     stmt = (
         select(Appointment)
+        .where(Appointment.organization_id == current_user.organization_id)
         .options(
             selectinload(Appointment.lead).selectinload(Lead.company),
             selectinload(Appointment.lead).selectinload(Lead.person),
+            with_loader_criteria(
+                Lead,
+                Lead.organization_id == current_user.organization_id,
+                include_aliases=True,
+            ),
+            with_loader_criteria(
+                Company,
+                Company.organization_id == current_user.organization_id,
+                include_aliases=True,
+            ),
+            with_loader_criteria(
+                Person,
+                Person.organization_id == current_user.organization_id,
+                include_aliases=True,
+            ),
         )
         .order_by(desc(Appointment.start_time))
     )
-    res = await db.execute(stmt)
+    total = await db.scalar(
+        select(func.count()).select_from(stmt.order_by(None).subquery())
+    ) or 0
+    res = await db.execute(stmt.offset((page - 1) * page_size).limit(page_size))
     appts = res.scalars().all()
 
     output = []
@@ -99,61 +173,70 @@ async def list_appointments(db: AsyncSession = Depends(get_db)):
             "company_name": company.name if company else (a.metadata_ or {}).get("company_name", "Target Account"),
         })
 
-    return output
+    return {
+        "items": output,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "pages": (total + page_size - 1) // page_size,
+    }
 
 @router.post("/appointments", status_code=status.HTTP_201_CREATED, summary="Create an appointment directly")
-async def create_appointment(payload: CreateAppointmentDirectRequest, db: AsyncSession = Depends(get_db)):
+async def create_appointment(
+    payload: CreateAppointmentDirectRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Manually book or schedule an appointment."""
-    import uuid
     from datetime import datetime, timedelta, timezone
 
-    org_res = await db.execute(select(Organization).limit(1))
-    org = org_res.scalars().first()
-    if not org:
-        org = Organization(name="Default Workspace", slug="default-workspace")
-        db.add(org)
+    organization_id = current_user.organization_id
+    lead_uuid = payload.lead_id
+    if lead_uuid:
+        lead_res = await db.execute(
+            select(Lead.id).where(
+                Lead.id == lead_uuid,
+                Lead.organization_id == organization_id,
+            )
+        )
+        if lead_res.scalar_one_or_none() is None:
+            raise HTTPException(status_code=404, detail="Lead not found")
+    else:
+        comp = Company(
+            organization_id=organization_id,
+            name=payload.company_name or "Prospect Inc",
+        )
+        db.add(comp)
         await db.flush()
-
-    lead_uuid = None
-    if payload.lead_id:
-        try:
-            lead_uuid = uuid.UUID(payload.lead_id)
-        except Exception:
-            pass
-
-    if not lead_uuid:
-        # Pick the latest lead or create a placeholder lead
-        lead_res = await db.execute(select(Lead).limit(1))
-        latest_lead = lead_res.scalars().first()
-        if latest_lead:
-            lead_uuid = latest_lead.id
-        else:
-            # Create a company and lead
-            comp = Company(organization_id=org.id, name=payload.company_name or "Prospect Inc", domain="prospect.com")
-            db.add(comp)
-            await db.flush()
-            lead = Lead(organization_id=org.id, company_id=comp.id, status="qualified", score=85)
-            db.add(lead)
-            await db.flush()
-            lead_uuid = lead.id
+        lead = Lead(
+            organization_id=organization_id,
+            company_id=comp.id,
+            status="qualified",
+            score=85,
+        )
+        db.add(lead)
+        await db.flush()
+        lead_uuid = lead.id
 
     now = datetime.now(timezone.utc)
     st = payload.start_time or (now + timedelta(days=1, hours=2))
     et = payload.end_time or (st + timedelta(minutes=30))
+    if et <= st:
+        raise HTTPException(status_code=422, detail="end_time must be after start_time")
 
     appt = Appointment(
-        organization_id=org.id,
+        organization_id=organization_id,
         lead_id=lead_uuid,
         title=payload.title,
         description=payload.notes or "Scheduled demo call via Xobalt AI",
         start_time=st,
         end_time=et,
         status="scheduled",
-        meeting_link=payload.meeting_link or "https://meet.google.com/xob-live-rev",
+        meeting_link=payload.meeting_link,
         metadata_={
-            "attendee_name": payload.attendee_name or "Prospective Client",
-            "attendee_email": payload.attendee_email or "client@company.com",
-            "company_name": payload.company_name or "Target Account",
+            "attendee_name": payload.attendee_name,
+            "attendee_email": payload.attendee_email,
+            "company_name": payload.company_name,
         }
     )
     db.add(appt)
@@ -167,4 +250,3 @@ async def create_appointment(payload: CreateAppointmentDirectRequest, db: AsyncS
         "status": appt.status,
         "meeting_link": appt.meeting_link
     }
-

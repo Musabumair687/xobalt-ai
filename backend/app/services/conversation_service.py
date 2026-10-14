@@ -1,6 +1,7 @@
 """Service for managing Conversations and Inbox ingestion."""
 
 import logging
+import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.models.conversation import Conversation
@@ -14,7 +15,13 @@ class ConversationService:
     def __init__(self, db: AsyncSession):
         self.db = db
         
-    async def process_incoming_email(self, sender_email: str, subject: str, content: str) -> ConversationMessage:
+    async def process_incoming_email(
+        self,
+        sender_email: str,
+        subject: str,
+        content: str,
+        organization_id: uuid.UUID,
+    ) -> ConversationMessage:
         """
         Process an incoming email. Finds the associated lead/conversation and stores the message.
         """
@@ -22,7 +29,13 @@ class ConversationService:
         
         # Find contact
         res_contact = await self.db.execute(
-            select(Contact).where(Contact.type == "email", Contact.value == sender_email)
+            select(Contact)
+            .join(Lead, Lead.person_id == Contact.person_id)
+            .where(
+                Contact.type == "email",
+                Contact.value == sender_email,
+                Lead.organization_id == organization_id,
+            )
         )
         contact = res_contact.scalars().first()
         
@@ -31,7 +44,10 @@ class ConversationService:
             
         # Find lead
         res_lead = await self.db.execute(
-            select(Lead).where(Lead.person_id == contact.person_id)
+            select(Lead).where(
+                Lead.person_id == contact.person_id,
+                Lead.organization_id == organization_id,
+            )
         )
         lead = res_lead.scalars().first()
         
@@ -40,13 +56,17 @@ class ConversationService:
             
         # Find or create conversation
         res_conv = await self.db.execute(
-            select(Conversation).where(Conversation.lead_id == lead.id, Conversation.channel == "email")
+            select(Conversation).where(
+                Conversation.lead_id == lead.id,
+                Conversation.organization_id == organization_id,
+                Conversation.channel == "email",
+            )
         )
         conv = res_conv.scalars().first()
         
         if not conv:
             conv = Conversation(
-                organization_id=lead.organization_id,
+                organization_id=organization_id,
                 lead_id=lead.id,
                 subject=subject,
                 channel="email"

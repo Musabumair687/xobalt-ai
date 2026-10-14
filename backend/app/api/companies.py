@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Optional
-from fastapi import APIRouter, Depends, Query
+from typing import Annotated, Optional
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, desc, func
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import selectinload, with_loader_criteria
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.dependencies import get_db
@@ -15,23 +15,41 @@ from app.models.company import Company
 from app.models.company_intelligence import CompanyIntelligence
 from app.models.website import Website
 from app.models.lead import Lead
+from app.models.person import Person
+from app.models.user import User
+from app.auth import get_current_user
+from app.schemas.common import PaginatedResponse
+from app.schemas.contracts import CompanyListItem
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/companies", tags=["Companies"])
 
 
-@router.get("", summary="List all discovered companies with website intelligence")
+@router.get(
+    "",
+    response_model=PaginatedResponse[CompanyListItem],
+    summary="List discovered companies with website intelligence",
+)
 async def list_companies(
-    industry: Optional[str] = Query(None, description="Filter by industry"),
-    query: Optional[str] = Query(None, description="Search company name or domain"),
+    current_user: User = Depends(get_current_user),
+    industry: Annotated[Optional[str], Query(description="Filter by industry")] = None,
+    query: Annotated[Optional[str], Query(description="Search company name or domain")] = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     db: AsyncSession = Depends(get_db)
 ):
-    """Retrieve all discovered companies enriched with live website intelligence."""
+    """Retrieve a page of discovered companies enriched with website intelligence."""
     stmt = (
         select(Company)
+        .where(Company.organization_id == current_user.organization_id)
         .options(
             selectinload(Company.intelligence),
             selectinload(Company.leads),
+            with_loader_criteria(
+                Lead,
+                Lead.organization_id == current_user.organization_id,
+                include_aliases=True,
+            ),
         )
         .order_by(desc(Company.created_at))
     )
@@ -44,7 +62,10 @@ async def list_companies(
             (Company.name.ilike(f"%{query}%")) | (Company.domain.ilike(f"%{query}%"))
         )
 
-    res = await db.execute(stmt)
+    total = await db.scalar(
+        select(func.count()).select_from(stmt.order_by(None).subquery())
+    ) or 0
+    res = await db.execute(stmt.offset((page - 1) * page_size).limit(page_size))
     companies = res.scalars().all()
 
     output = []
@@ -79,25 +100,48 @@ async def list_companies(
             "created_at": c.created_at.isoformat() if c.created_at else None,
         })
 
-    return output
+    return {
+        "items": output,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "pages": (total + page_size - 1) // page_size,
+    }
 
 
 @router.get("/{company_id}", summary="Get detailed intelligence for a specific company")
-async def get_company_details(company_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def get_company_details(
+    company_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Fetch complete details, intelligence, and associated contacts for a company."""
     stmt = (
         select(Company)
         .options(
             selectinload(Company.intelligence),
             selectinload(Company.leads).selectinload(Lead.person),
+            with_loader_criteria(
+                Lead,
+                Lead.organization_id == current_user.organization_id,
+                include_aliases=True,
+            ),
+            with_loader_criteria(
+                Person,
+                Person.organization_id == current_user.organization_id,
+                include_aliases=True,
+            ),
         )
-        .where(Company.id == company_id)
+        .where(
+            Company.id == company_id,
+            Company.organization_id == current_user.organization_id,
+        )
     )
     res = await db.execute(stmt)
     c = res.scalars().first()
 
     if not c:
-        return {"error": "Company not found"}
+        raise HTTPException(status_code=404, detail="Company not found")
 
     intel = c.intelligence
     return {

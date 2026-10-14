@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Optional
 from sqlalchemy import String, Integer, DateTime, ForeignKey, Text, JSON
 from sqlalchemy.orm import Mapped, mapped_column
-from backend.app.database.session import Base
+from app.database.base import Base
 
 class KnowledgeDocument(Base):
     __tablename__ = "knowledge_documents"

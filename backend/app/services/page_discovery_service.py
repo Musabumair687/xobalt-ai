@@ -6,6 +6,7 @@ Uses heuristics and common paths to discover /about, /services, etc.
 from app.integrations.website.base import WebsiteFetcher
 from app.integrations.website.parser import extract_links
 from app.schemas.website_intelligence import DiscoveredPage, PageType
+from app.integrations.provider_errors import safe_provider_error
 
 
 class PageDiscoveryService:
@@ -42,7 +43,7 @@ class PageDiscoveryService:
         try:
             status, html = await self.fetcher.fetch(root_url)
             if status != 200 or not html:
-                return pages
+                raise RuntimeError(f"website returned HTTP {status}")
                 
             links = extract_links(html, root_url)
             
@@ -62,7 +63,7 @@ class PageDiscoveryService:
                 if len(pages) >= max_pages:
                     break
                     
-        except Exception:
-            pass # Return whatever we got (at least home)
+        except Exception as exc:
+            raise safe_provider_error("website_discovery", exc) from exc
             
         return pages

@@ -6,6 +6,7 @@ from sqlalchemy import select, func
 from app.models.message import Message
 from app.models.lead import Lead
 from app.models.campaign import Campaign
+from app.models.organization import Organization
 from app.schemas.enforcer import PolicyResult
 
 class PolicyService:
@@ -15,10 +16,24 @@ class PolicyService:
     async def evaluate(self, message: Message, lead: Lead, campaign: Campaign) -> PolicyResult:
         """Evaluate if the message is allowed to be sent based on all business rules."""
         reasons = []
+        org_res = await self.db.execute(
+            select(Organization).where(
+                Organization.id == message.organization_id,
+            )
+        )
+        organization = org_res.scalars().first()
+        guardrails = ((organization.settings or {}).get("guardrails", {}) if organization else {})
+        require_approval = guardrails.get("require_human_approval", True)
+        min_lead_score = guardrails.get("min_lead_score", 70)
+        daily_send_limit = guardrails.get("daily_send_limit", 50)
         
         # 1. Approval
-        if message.status != "approved":
+        if require_approval and message.status != "approved":
             reasons.append(f"Message status is '{message.status}', must be 'approved'.")
+        if message.direction != "outbound" or message.channel != "email":
+            reasons.append("Only outbound email messages may be sent.")
+        if lead.score is None or lead.score < min_lead_score:
+            reasons.append(f"Lead score must be at least {min_lead_score}.")
             
         # 2. Contact validity
         if not lead.person:
@@ -47,6 +62,7 @@ class PolicyService:
         res_count = await self.db.execute(
             select(func.count(Message.id)).where(
                 Message.campaign_id == campaign.id,
+                Message.organization_id == message.organization_id,
                 Message.status == "sent",
                 Message.sent_at >= today
             )
@@ -54,6 +70,18 @@ class PolicyService:
         sent_today = res_count.scalar() or 0
         if sent_today >= campaign.daily_limit:
             reasons.append(f"Campaign has reached its daily limit of {campaign.daily_limit} messages.")
+        org_daily_res = await self.db.execute(
+            select(func.count(Message.id)).where(
+                Message.organization_id == message.organization_id,
+                Message.status == "sent",
+                Message.sent_at >= today,
+            )
+        )
+        org_sent_today = org_daily_res.scalar() or 0
+        if org_sent_today >= daily_send_limit:
+            reasons.append(
+                f"Organization has reached its daily send limit of {daily_send_limit} messages."
+            )
             
         # 6. Duplicate checking
         # Did we already send this exact message to this lead?
@@ -61,6 +89,7 @@ class PolicyService:
         res_dup = await self.db.execute(
             select(Message).where(
                 Message.campaign_id == campaign.id,
+                Message.organization_id == message.organization_id,
                 Message.lead_id == lead.id,
                 Message.status == "sent"
             )

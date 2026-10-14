@@ -62,8 +62,8 @@ class HunterVerificationProvider(VerificationProvider):
                         provider=self.name,
                         reason=f"hunter_{raw_status}",
                     )
-        except Exception as e:
-            logger.warning("Hunter email verification failed for '%s': %s", email, e)
+        except Exception as exc:
+            logger.warning("Hunter email verification failed (%s).", type(exc).__name__)
 
         return VerificationResult(
             contact_value=email,

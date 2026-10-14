@@ -5,57 +5,112 @@ from __future__ import annotations
 import logging
 from fastapi import APIRouter, Depends
 from sqlalchemy import select, func, desc
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import selectinload, with_loader_criteria
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.dependencies import get_db
-from app.config import get_settings
 from app.models.lead import Lead
 from app.models.company import Company
 from app.models.person import Person
-from app.models.contact import Contact
 from app.models.message import Message
 from app.models.appointment import Appointment
+from app.models.user import User
+from app.auth import get_current_user
+from app.schemas.contracts import DashboardSummaryResponse
+from app.api.settings import get_settings_status
+from app.services.integration_settings_service import get_organization_settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
 
 
-@router.get("/summary", summary="Get live pipeline summary metrics")
-async def get_dashboard_summary(db: AsyncSession = Depends(get_db)):
+@router.get(
+    "/summary",
+    response_model=DashboardSummaryResponse,
+    summary="Get live organization pipeline summary metrics",
+)
+async def get_dashboard_summary(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Return live metrics from the database."""
-    settings = get_settings()
+    settings = await get_organization_settings(db, current_user.organization_id)
 
     # Count total leads
-    leads_count_res = await db.execute(select(func.count(Lead.id)))
+    leads_count_res = await db.execute(
+        select(func.count(Lead.id)).where(
+            Lead.organization_id == current_user.organization_id
+        )
+    )
     total_leads = leads_count_res.scalar() or 0
 
     # Count qualified leads (score >= 70)
-    qual_count_res = await db.execute(select(func.count(Lead.id)).where(Lead.score >= 70))
+    qual_count_res = await db.execute(
+        select(func.count(Lead.id)).where(
+            Lead.organization_id == current_user.organization_id,
+            Lead.score >= 70,
+        )
+    )
     qualified_leads = qual_count_res.scalar() or 0
 
     # Count companies
-    comp_count_res = await db.execute(select(func.count(Company.id)))
+    comp_count_res = await db.execute(
+        select(func.count(Company.id)).where(
+            Company.organization_id == current_user.organization_id
+        )
+    )
     total_companies = comp_count_res.scalar() or 0
 
     # Count messages
-    sent_count_res = await db.execute(select(func.count(Message.id)).where(Message.status == "sent"))
+    sent_count_res = await db.execute(
+        select(func.count(Message.id)).where(
+            Message.organization_id == current_user.organization_id,
+            Message.status == "sent",
+        )
+    )
     messages_sent = sent_count_res.scalar() or 0
 
-    draft_count_res = await db.execute(select(func.count(Message.id)).where(Message.status != "sent"))
+    draft_count_res = await db.execute(
+        select(func.count(Message.id)).where(
+            Message.organization_id == current_user.organization_id,
+            Message.direction == "outbound",
+            Message.status.in_(("draft", "pending_approval")),
+        )
+    )
     messages_drafted = draft_count_res.scalar() or 0
 
     # Count meetings
-    meet_count_res = await db.execute(select(func.count(Appointment.id)))
+    meet_count_res = await db.execute(
+        select(func.count(Appointment.id)).where(
+            Appointment.organization_id == current_user.organization_id,
+            Appointment.status.in_(("scheduled", "confirmed", "booked")),
+        )
+    )
     meetings_booked = meet_count_res.scalar() or 0
 
     # Recent Discovered Leads (latest 8)
     recent_leads_res = await db.execute(
         select(Lead)
+        .where(Lead.organization_id == current_user.organization_id)
         .options(
             selectinload(Lead.company),
             selectinload(Lead.person).selectinload(Person.contacts),
             selectinload(Lead.messages),
+            with_loader_criteria(
+                Company,
+                Company.organization_id == current_user.organization_id,
+                include_aliases=True,
+            ),
+            with_loader_criteria(
+                Person,
+                Person.organization_id == current_user.organization_id,
+                include_aliases=True,
+            ),
+            with_loader_criteria(
+                Message,
+                Message.organization_id == current_user.organization_id,
+                include_aliases=True,
+            ),
         )
         .order_by(desc(Lead.created_at))
         .limit(8)
@@ -77,10 +132,10 @@ async def get_dashboard_summary(db: AsyncSession = Depends(get_db)):
         p_contacts = l.person.contacts if l.person else []
         email = next((c.value for c in p_contacts if c.type == "email"), None)
         is_verified = any(c.is_verified for c in p_contacts if c.type == "email")
-        email_status = "verified" if is_verified else ("deliverable" if email else "domain_contact")
+        email_status = "verified" if is_verified else ("unverified" if email else "no_email")
 
         score_val = int(l.score) if l.score is not None else None
-        qual_status = "Qualified" if (l.score and l.score >= 70) else ("Review" if (l.score and l.score >= 50) else "New")
+        qual_status = "Qualified" if (score_val is not None and score_val >= 70) else ("Review" if (score_val is not None and score_val >= 50) else "New")
 
         # Has outreach message drafted or sent?
         msg_status = "not_started"
@@ -116,34 +171,16 @@ async def get_dashboard_summary(db: AsyncSession = Depends(get_db)):
     active_model = settings.GEMINI_MODEL if settings.LLM_PROVIDER == "gemini" else settings.GROQ_MODEL
     active_provider = settings.LLM_PROVIDER.capitalize()
 
-    # Dynamic integrations status based on configuration
+    configured = await get_settings_status(current_user, db)
+    integrations_by_id = {item.id: item for item in configured.integrations}
     integrations = {
-        "llm": {
-            "name": f"{active_provider} ({active_model})",
-            "status": "connected" if (settings.GEMINI_API_KEY or settings.GROQ_API_KEY) else "unconfigured",
-            "provider": settings.LLM_PROVIDER,
-        },
-        "search": {
-            "name": "Tavily Search" if settings.TAVILY_API_KEY else "DuckDuckGo Free",
-            "status": "connected" if settings.TAVILY_API_KEY else "free_tier",
-            "provider": "tavily" if settings.TAVILY_API_KEY else "ddg",
-        },
-        "enrichment": {
-            "name": "Apollo.io Live",
-            "status": "connected" if settings.APOLLO_API_KEY else "unconfigured",
-            "provider": "apollo",
-        },
-        "verification": {
-            "name": "DNS MX Deliverability",
-            "status": "connected",
-            "provider": "dns",
-        },
-        "email": {
-            "name": "Resend API",
-            "status": "connected" if settings.RESEND_API_KEY else "smtp",
-            "provider": "resend" if settings.RESEND_API_KEY else "smtp",
-        }
+        "llm": integrations_by_id["llm"].model_dump(),
+        "search": integrations_by_id["discovery"].model_dump(),
+        "enrichment": integrations_by_id["enrichment"].model_dump(),
+        "verification": integrations_by_id["verification"].model_dump(),
+        "email": integrations_by_id["email"].model_dump(),
     }
+    integrations["llm"]["name"] = f"{active_provider} ({active_model})"
 
     return {
         "total_leads": total_leads,

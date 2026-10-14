@@ -4,6 +4,7 @@ import logging
 from langchain_core.language_models.chat_models import BaseChatModel
 from app.schemas.website_intelligence import FetchedPage, ExtractedIntelligence, IntelligenceWithEvidence
 from app.agents.website_intelligence.prompts import EXTRACTION_PROMPT
+from app.integrations.provider_errors import safe_provider_error
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,7 @@ class IntelligenceService:
                 model_used=getattr(self.llm, "model_name", "unknown")
             )
             
-        except Exception as e:
-            logger.error(f"LLM Extraction failed: {e}")
-            raise
+        except Exception as exc:
+            safe_error = safe_provider_error("llm_intelligence", exc)
+            logger.error("LLM extraction failed (%s).", safe_error.error_type)
+            raise safe_error from exc

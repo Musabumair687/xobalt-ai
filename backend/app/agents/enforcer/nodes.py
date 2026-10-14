@@ -13,6 +13,7 @@ from app.models.message import Message
 from app.models.lead import Lead
 from app.models.person import Person
 from app.models.campaign_lead import CampaignLead
+from app.integrations.provider_errors import safe_provider_error
 
 logger = logging.getLogger(__name__)
 
@@ -77,9 +78,12 @@ async def execute_send(state: EnforcerState, outreach_service: OutreachService) 
     
     try:
         ext_id = await outreach_service.send_message(msg, email)
+        if ext_id is None:
+            return {"status": "skipped"}
         return {"send_result_external_id": ext_id, "status": "sent"}
     except Exception as e:
-        return {"errors": [f"Send failed: {e}"], "status": "failed"}
+        safe_error = safe_provider_error("email_delivery", e)
+        return {"errors": [str(safe_error)], "status": "failed"}
 
 
 async def record_event(state: EnforcerState, event_service: MessageEventService) -> dict:

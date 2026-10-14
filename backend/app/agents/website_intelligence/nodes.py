@@ -1,6 +1,7 @@
 """LangGraph nodes for the Website Intelligence workflow."""
 
 import logging
+from app.integrations.provider_errors import safe_provider_error
 from app.agents.website_intelligence.state import WebsiteIntelligenceState
 from app.services.page_discovery_service import PageDiscoveryService
 from app.services.content_extraction_service import ContentExtractionService
@@ -54,5 +55,8 @@ async def extract_intelligence(
     try:
         intel = await intelligence_service.extract(fetched)
         return {"extracted_intelligence": intel}
-    except Exception as e:
-        return {"errors": state.get("errors", []) + [f"LLM extraction failed: {str(e)}"]}
+    except Exception as exc:
+        safe_error = safe_provider_error("llm_intelligence", exc)
+        return {
+            "errors": state.get("errors", []) + [str(safe_error)],
+        }

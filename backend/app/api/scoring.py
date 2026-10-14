@@ -10,6 +10,11 @@ from app.services.intent_service import IntentService
 from app.services.intent_signal_service import IntentSignalService
 from app.services.scoring_service import ScoringService
 from app.workflows.scoring_intent_workflow import build_scoring_intent_graph
+from app.models.lead import Lead
+from app.models.user import User
+from app.auth import get_current_user
+from app.services.integration_settings_service import get_organization_settings
+from sqlalchemy import select
 
 # Try to reuse LLM factory from website intelligence
 try:
@@ -36,13 +41,27 @@ router = APIRouter(prefix="/leads", tags=["Scoring & Intent"])
 )
 async def score_lead(
     lead_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """Trigger the Scoring and Intent workflow for a specific lead."""
+
+    lead_res = await db.execute(
+        select(Lead.id).where(
+            Lead.id == lead_id,
+            Lead.organization_id == current_user.organization_id,
+        )
+    )
+    if lead_res.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Lead not found")
     
     # Setup services
     try:
-        llm = get_llm()
+        llm = get_llm(
+            await get_organization_settings(db, current_user.organization_id)
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to load LLM for scoring: {e}")
         raise HTTPException(status_code=500, detail="LLM configuration error")

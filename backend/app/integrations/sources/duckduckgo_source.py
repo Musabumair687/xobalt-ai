@@ -8,6 +8,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 
 from app.integrations.sources.base import LeadSource
+from app.integrations.provider_errors import safe_provider_error
 from app.schemas.hunter import DiscoveredCompany, HunterCriteria
 
 logger = logging.getLogger(__name__)
@@ -42,9 +43,9 @@ class DuckDuckGoSource(LeadSource):
                     follow_redirects=True,
                 )
                 html = response.text
-        except Exception as e:
-            logger.error("DuckDuckGoSource error: %s", e)
-            return []
+        except Exception as exc:
+            logger.error("DuckDuckGo request failed (%s).", type(exc).__name__)
+            raise safe_provider_error(self.name, exc) from exc
 
         companies: list[DiscoveredCompany] = []
         seen_domains = set()

@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 import httpx
 
 from app.integrations.sources.base import LeadSource
+from app.integrations.provider_errors import ProviderConfigurationError, safe_provider_error
 from app.schemas.hunter import DiscoveredCompany, HunterCriteria
 
 logger = logging.getLogger(__name__)
@@ -31,8 +32,7 @@ class SerpApiSource(LeadSource):
 
     async def search(self, criteria: HunterCriteria) -> list[DiscoveredCompany]:
         if not self._api_key:
-            logger.warning("SerpApiSource: no API key configured.")
-            return []
+            raise ProviderConfigurationError("SerpAPI is selected but has no API key.")
 
         query = f"top {criteria.industry} companies in {criteria.country}"
         logger.info("SerpApiSource searching: '%s'", query)
@@ -49,9 +49,9 @@ class SerpApiSource(LeadSource):
                 response = await client.get("https://serpapi.com/search.json", params=params)
                 response.raise_for_status()
                 data = response.json()
-        except Exception as e:
-            logger.error("SerpApiSource HTTP error: %s", e)
-            return []
+        except Exception as exc:
+            logger.error("SerpAPI request failed (%s).", type(exc).__name__)
+            raise safe_provider_error(self.name, exc) from exc
 
         companies: list[DiscoveredCompany] = []
         seen_domains = set()

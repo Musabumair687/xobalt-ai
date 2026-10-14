@@ -39,32 +39,38 @@ class ScoringService:
 
     def calculate_industry_score(self, company: Optional[Company]) -> ScoreBreakdownCategory:
         if not company or not company.industry:
-            return ScoreBreakdownCategory(score=WEIGHT_INDUSTRY // 2, reason="Industry not fully specified; partial fit")
+            return ScoreBreakdownCategory(score=0, reason="Industry is unavailable")
             
-        industry_lower = company.industry.lower()
+        industry_lower = company.industry.lower().strip()
+        if not industry_lower:
+            return ScoreBreakdownCategory(score=0, reason="Industry is unavailable")
+
         if self.target_industry and (self.target_industry in industry_lower or industry_lower in self.target_industry):
             return ScoreBreakdownCategory(score=WEIGHT_INDUSTRY, reason=f"Industry '{company.industry}' is an exact ICP target match")
             
         if any(target in industry_lower for target in TARGET_INDUSTRIES):
             return ScoreBreakdownCategory(score=WEIGHT_INDUSTRY, reason=f"Industry '{company.industry}' matches target business sector")
             
-        return ScoreBreakdownCategory(score=int(WEIGHT_INDUSTRY * 0.8), reason=f"Industry '{company.industry}' is a relevant commercial match")
+        return ScoreBreakdownCategory(score=WEIGHT_INDUSTRY // 2, reason=f"Industry '{company.industry}' is outside the defined target sectors")
 
     def calculate_size_score(self, company: Optional[Company]) -> ScoreBreakdownCategory:
         if not company:
-            return ScoreBreakdownCategory(score=5, reason="Company profile pending employee validation")
+            return ScoreBreakdownCategory(score=0, reason="Company profile unavailable")
             
         count = company.employee_count
-        if count is not None:
-            if 5 <= count <= 250:
-                return ScoreBreakdownCategory(score=WEIGHT_SIZE, reason=f"{count} employees is within prime SMB sweet spot (5-250)")
-            elif count > 250:
-                return ScoreBreakdownCategory(score=WEIGHT_SIZE - 5, reason=f"{count} employees is mid-market to enterprise")
-            else:
-                return ScoreBreakdownCategory(score=WEIGHT_SIZE - 5, reason=f"{count} employees is boutique firm")
-                
-        # If employee count unknown but has established digital presence
-        return ScoreBreakdownCategory(score=WEIGHT_SIZE - 5, reason="Active independent business operating in target market (est. 10-50 staff)")
+        if count is None:
+            return ScoreBreakdownCategory(score=0, reason="Employee count is unavailable")
+
+        if TARGET_MIN_EMPLOYEES <= count <= TARGET_MAX_EMPLOYEES:
+            return ScoreBreakdownCategory(
+                score=WEIGHT_SIZE,
+                reason=f"{count} employees is within the target company-size range ({TARGET_MIN_EMPLOYEES}-{TARGET_MAX_EMPLOYEES})",
+            )
+
+        return ScoreBreakdownCategory(
+            score=0,
+            reason=f"{count} employees is outside the target company-size range ({TARGET_MIN_EMPLOYEES}-{TARGET_MAX_EMPLOYEES})",
+        )
 
     def calculate_location_score(self, company: Optional[Company]) -> ScoreBreakdownCategory:
         if not company:
@@ -92,7 +98,10 @@ class ScoringService:
         if any(target in title_lower for target in TARGET_TITLES):
             return ScoreBreakdownCategory(score=WEIGHT_DECISION_MAKER, reason=f"Key decision maker identified: '{person.title}'")
             
-        return ScoreBreakdownCategory(score=int(WEIGHT_DECISION_MAKER * 0.7), reason=f"Operational contact identified: '{person.title}'")
+        return ScoreBreakdownCategory(
+            score=WEIGHT_DECISION_MAKER // 2,
+            reason=f"Operational contact identified: '{person.title}'",
+        )
 
 
     def calculate_website_score(self, intelligence: Optional[CompanyIntelligence]) -> ScoreBreakdownCategory:

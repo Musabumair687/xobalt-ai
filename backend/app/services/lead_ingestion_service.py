@@ -68,6 +68,14 @@ class LeadIngestionService:
         # 1. Upsert company
         db_company = await self._upsert_company(organization_id, company)
 
+        if not people:
+            await self._db.commit()
+            logger.info(
+                "Persisted company '%s' without creating a contactless lead.",
+                company.name,
+            )
+            return lead_ids
+
         # Build a quick lookup: email → verification result
         verif_map = {vr.contact_value: vr for vr in verification_results}
 
@@ -175,7 +183,10 @@ class LeadIngestionService:
             result = await self._db.execute(
                 select(Person)
                 .join(Contact, Person.id == Contact.person_id)
-                .where(Contact.value == data.email)
+                .where(
+                    Contact.value == data.email,
+                    Person.organization_id == organization_id,
+                )
             )
             existing = result.scalar_one_or_none()
             if existing:
@@ -255,6 +266,33 @@ class LeadIngestionService:
         source_name: str,
     ) -> Lead:
         """Create a new Lead row and optionally link it to a campaign."""
+        existing_result = await self._db.execute(
+            select(Lead).where(
+                Lead.organization_id == organization_id,
+                Lead.company_id == company_id,
+                Lead.person_id == person_id,
+            )
+        )
+        lead = existing_result.scalars().first()
+        if lead is not None:
+            if campaign_id:
+                campaign_link = await self._db.execute(
+                    select(CampaignLead.id).where(
+                        CampaignLead.campaign_id == campaign_id,
+                        CampaignLead.lead_id == lead.id,
+                    )
+                )
+                if campaign_link.scalar_one_or_none() is None:
+                    self._db.add(
+                        CampaignLead(
+                            campaign_id=campaign_id,
+                            lead_id=lead.id,
+                            status="pending",
+                        )
+                    )
+            await self._db.flush()
+            return lead
+
         lead = Lead(
             organization_id=organization_id,
             company_id=company_id,

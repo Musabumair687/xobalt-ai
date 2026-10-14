@@ -54,8 +54,8 @@ class BookingService:
         
         # Save Appointment
         appt = await self.appt_svc.create_appointment(
-            org_id=uuid.UUID(request.organization_id),
-            lead_id=uuid.UUID(request.lead_id),
+            org_id=request.organization_id,
+            lead_id=request.lead_id,
             conv_id=conv_id,
             event=event,
             timezone=request.slot.timezone

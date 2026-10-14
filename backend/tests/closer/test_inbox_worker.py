@@ -59,6 +59,11 @@ async def test_inbox_worker_process(db_session: AsyncSession):
     with patch("app.workers.inbox_worker.ChatGroq", new=MockChatGroq), \
          patch("app.services.response_service.ResponseService.generate_response", new_callable=AsyncMock) as mock_resp:
         mock_resp.return_value = "Mock Response"
-        result = await worker.process_new_reply("john@test.com", "Subject", "Hello")
+        result = await worker.process_new_reply(
+            "john@test.com",
+            "Subject",
+            "Hello",
+            org_id,
+        )
         
     assert result["action_taken"] == "GENERATED_RESPONSE_PENDING_APPROVAL"

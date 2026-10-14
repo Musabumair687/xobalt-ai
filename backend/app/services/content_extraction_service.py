@@ -4,6 +4,7 @@ import logging
 from app.integrations.website.base import WebsiteFetcher
 from app.integrations.website.parser import parse_html
 from app.schemas.website_intelligence import DiscoveredPage, FetchedPage
+from app.integrations.provider_errors import safe_provider_error
 
 logger = logging.getLogger(__name__)
 
@@ -28,14 +29,9 @@ class ContentExtractionService:
                 clean_text=clean_text,
                 content_length=len(clean_text),
             )
-        except Exception as e:
-            logger.error(f"Failed to fetch {page.url}: {e}")
-            return FetchedPage(
-                url=page.url,
-                page_type=page.page_type,
-                status_code=500,
-                clean_text="",
-            )
+        except Exception as exc:
+            logger.error("Website page fetch failed (%s).", type(exc).__name__)
+            raise safe_provider_error("website_content", exc) from exc
 
     async def process_pages(self, pages: list[DiscoveredPage]) -> list[FetchedPage]:
         """Fetch and clean multiple pages sequentially (to avoid rate limits)."""

@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 
 from app.integrations.verification.base import VerificationProvider
+from app.integrations.provider_errors import ProviderConfigurationError
 from app.schemas.hunter import VerificationResult, VerificationStatus
 
 logger = logging.getLogger(__name__)
@@ -63,21 +64,43 @@ class VerificationService:
     """Application-level facade for contact verification."""
 
     def __init__(self, provider: VerificationProvider | None = None) -> None:
+        self.mode = "injected" if provider is not None else "configured"
         if provider is not None:
             self._provider = provider
             return
 
-        from app.config import get_settings
-        settings = get_settings()
+        from app.services.integration_settings_service import get_runtime_settings
+        settings = get_runtime_settings()
 
-        if settings.HUNTER_API_KEY and settings.VERIFICATION_PROVIDER in ("auto", "hunter"):
+        selected = settings.VERIFICATION_PROVIDER.lower().strip()
+        if selected == "mock":
+            self._provider = MockVerificationProvider()
+        elif selected == "hunter":
+            if not settings.HUNTER_API_KEY:
+                raise ProviderConfigurationError("Hunter verification is selected but has no API key.")
             from app.integrations.verification.hunter_verifier import HunterVerificationProvider
             self._provider = HunterVerificationProvider(api_key=settings.HUNTER_API_KEY)
-        elif settings.VERIFICATION_PROVIDER == "dns":
+        elif selected == "dns":
             from app.integrations.verification.dns_verifier import DnsVerificationProvider
             self._provider = DnsVerificationProvider()
+        elif selected == "auto":
+            if settings.HUNTER_API_KEY:
+                from app.integrations.verification.hunter_verifier import HunterVerificationProvider
+                self._provider = HunterVerificationProvider(api_key=settings.HUNTER_API_KEY)
+            else:
+                raise ProviderConfigurationError(
+                    "Verification provider is auto but no real provider is configured; "
+                    "select VERIFICATION_PROVIDER=mock for mock mode."
+                )
         else:
-            self._provider = MockVerificationProvider()
+            raise ProviderConfigurationError(
+                f"Unsupported verification provider: {selected or 'empty'}."
+            )
+        self.mode = "mock" if isinstance(self._provider, MockVerificationProvider) else "real"
+
+    @property
+    def provider_name(self) -> str:
+        return self._provider.name
 
     async def verify_email(self, email: str) -> VerificationResult:
         """Verify a single email address.

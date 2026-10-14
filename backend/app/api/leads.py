@@ -4,23 +4,25 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select, desc
-from sqlalchemy.orm import selectinload
+from sqlalchemy import select, desc, or_, func
+from sqlalchemy.orm import selectinload, with_loader_criteria
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.dependencies import get_db
-from app.models.organization import Organization
 from app.models.campaign import Campaign
 from app.models.company import Company
 from app.models.person import Person
 from app.models.contact import Contact
 from app.models.lead import Lead
 from app.models.message import Message
+from app.models.agent_run import AgentRun
+from app.models.user import User
+from app.auth import get_current_user
 from app.schemas.hunter import HunterCriteria
 from app.workflows.hunter_workflow import build_hunter_graph, get_initial_state
 from app.services.scoring_service import ScoringService
@@ -32,56 +34,104 @@ from app.services.message_validation_service import MessageValidationService
 from app.workflows.personalization_workflow import build_personalization_graph
 from app.integrations.email import get_email_provider
 from app.api.website_intelligence import get_llm
+from app.integrations.provider_errors import safe_provider_error
+from app.services.integration_settings_service import (
+    get_organization_settings,
+    organization_settings_scope,
+)
+from app.services.outreach_service import OutreachService
+from app.schemas.common import PaginatedResponse
+from app.schemas.contracts import LeadListItem
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/leads", tags=["Leads & Pipeline"])
 
 
 class LeadDiscoveryRequest(BaseModel):
-    industry: str = Field(default="Real Estate", examples=["Real Estate", "SaaS", "Fintech"])
-    country: str = Field(default="United States")
-    offer: Optional[str] = Field(default="Exploring strategic partnerships and business development synergies")
-    keywords: list[str] = Field(default_factory=list)
-    decision_maker_roles: list[str] = Field(default_factory=lambda: ["CEO", "Founder", "Director", "Owner", "President"])
+    industry: str = Field(default="Real Estate", min_length=1, max_length=255, examples=["Real Estate", "SaaS", "Fintech"])
+    country: str = Field(default="United States", min_length=1, max_length=100)
+    offer: Optional[str] = Field(default="Exploring strategic partnerships and business development synergies", max_length=5000)
+    keywords: list[str] = Field(default_factory=list, max_length=20)
+    decision_maker_roles: list[str] = Field(default_factory=lambda: ["CEO", "Founder", "Director", "Owner", "President"], max_length=20)
     max_companies: int = Field(default=3, ge=1, le=10)
 
 
 
 class MessageApprovalPayload(BaseModel):
-    edited_subject: Optional[str] = None
-    edited_body: Optional[str] = None
+    edited_subject: Optional[str] = Field(default=None, max_length=998)
+    edited_body: Optional[str] = Field(default=None, max_length=100000)
 
 
-async def _get_or_create_default_org(db: AsyncSession) -> Organization:
-    res = await db.execute(select(Organization).limit(1))
-    org = res.scalars().first()
-    if not org:
-        org = Organization(
-            name="Default Workspace",
-            slug="default-workspace",
-            industry="Sales & Outreach"
+async def _save_pipeline_run(
+    db: AsyncSession,
+    run: AgentRun,
+    steps: dict[str, dict[str, Any]],
+    lead_ids: list[uuid.UUID],
+    *,
+    completed: bool = False,
+) -> None:
+    failed = any(step.get("status") == "failed" for step in steps.values())
+    run.status = "failed" if failed else ("completed" if completed else "running")
+    run.output_data = {
+        "steps": steps,
+        "lead_ids": [str(lead_id) for lead_id in lead_ids],
+        "lead_count": len(lead_ids),
+    }
+    if completed:
+        run.completed_at = datetime.now(timezone.utc)
+        run.duration_seconds = max(
+            0.0, (run.completed_at - run.started_at).total_seconds()
         )
-        db.add(org)
-        await db.flush()
-    return org
+        if failed:
+            run.error_message = "One or more pipeline steps failed; see step details."
+    db.add(run)
+    await db.commit()
 
 
-@router.get("", summary="List all discovered leads with company, score, and messages")
-async def list_leads(db: AsyncSession = Depends(get_db)):
-    """Fetch all leads with associated Company, Person, Contacts, Intelligence, and Messages."""
+@router.get(
+    "",
+    response_model=PaginatedResponse[LeadListItem],
+    summary="List discovered leads with company, score, and messages",
+)
+async def list_leads(
+    current_user: User = Depends(get_current_user),
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    db: AsyncSession = Depends(get_db),
+):
+    """Fetch one page of leads with associated company, person, intelligence, and messages."""
     from app.models.company_intelligence import CompanyIntelligence
 
     stmt = (
         select(Lead)
+        .where(Lead.organization_id == current_user.organization_id)
         .options(
             selectinload(Lead.company),
             selectinload(Lead.person).selectinload(Person.contacts),
             selectinload(Lead.messages),
             selectinload(Lead.intent_signals),
+            with_loader_criteria(
+                Company,
+                Company.organization_id == current_user.organization_id,
+                include_aliases=True,
+            ),
+            with_loader_criteria(
+                Person,
+                Person.organization_id == current_user.organization_id,
+                include_aliases=True,
+            ),
+            with_loader_criteria(
+                Message,
+                Message.organization_id == current_user.organization_id,
+                include_aliases=True,
+            ),
         )
         .order_by(desc(Lead.created_at))
     )
-    res = await db.execute(stmt)
+    total = await db.scalar(
+        select(func.count()).select_from(stmt.order_by(None).subquery())
+    ) or 0
+    res = await db.execute(stmt.offset((page - 1) * page_size).limit(page_size))
     leads = res.scalars().all()
 
     # Pre-fetch CompanyIntelligence for all companies
@@ -89,7 +139,12 @@ async def list_leads(db: AsyncSession = Depends(get_db)):
     intel_map = {}
     if comp_ids:
         intels_res = await db.execute(
-            select(CompanyIntelligence).where(CompanyIntelligence.company_id.in_(comp_ids))
+            select(CompanyIntelligence)
+            .join(Company, Company.id == CompanyIntelligence.company_id)
+            .where(
+                CompanyIntelligence.company_id.in_(comp_ids),
+                Company.organization_id == current_user.organization_id,
+            )
         )
         for intel in intels_res.scalars().all():
             intel_map[intel.company_id] = intel
@@ -193,12 +248,19 @@ async def list_leads(db: AsyncSession = Depends(get_db)):
             "intelligence": intel_data,
         })
 
-    return output
+    return {
+        "items": output,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "pages": (total + page_size - 1) // page_size,
+    }
 
 
 @router.post("/find-and-generate", summary="Discover real leads and generate AI recommended outreach messages")
 async def find_and_generate_leads(
     req: LeadDiscoveryRequest,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -217,14 +279,10 @@ async def find_and_generate_leads(
     from app.services.intelligence_service import IntelligenceService
     from app.integrations.website.http_client import HttpFetcher
     from app.workflows.website_intelligence_workflow import build_website_intelligence_graph
-    from langchain_core.messages import HumanMessage
-    import json, re
-
-    org = await _get_or_create_default_org(db)
 
     # 1. Prepare Hunter Criteria
     criteria = HunterCriteria(
-        organization_id=org.id,
+        organization_id=current_user.organization_id,
         industry=req.industry,
         country=req.country,
         keywords=req.keywords,
@@ -232,30 +290,17 @@ async def find_and_generate_leads(
         max_companies=req.max_companies,
     )
 
-    # 2. Run Hunter Workflow
-    initial_state = get_initial_state(criteria.model_dump())
-    graph = build_hunter_graph(db=db)
-    
-    logger.info("Executing Live Hunter workflow for %s in %s...", req.industry, req.country)
-    hunter_final = await graph.ainvoke(initial_state)
-    
-    lead_ids = hunter_final.get("lead_ids", [])
-    logger.info("Hunter discovered and stored %d leads.", len(lead_ids))
-
-    if not lead_ids:
-        return {
-            "message": "Hunter completed, but no new unique companies were found.",
-            "discovered_count": 0,
-            "leads": []
-        }
-
-    # Ensure a default campaign exists for personalization
-    camp_res = await db.execute(select(Campaign).where(Campaign.organization_id == org.id).limit(1))
+    # Ensure a campaign exists before persistence so every discovered lead is linked.
+    camp_res = await db.execute(
+        select(Campaign)
+        .where(Campaign.organization_id == current_user.organization_id)
+        .limit(1)
+    )
     campaign = camp_res.scalars().first()
     user_offer = req.offer or f"Exploring strategic partnerships, business synergies, and client acquisition in {req.industry}."
     if not campaign:
         campaign = Campaign(
-            organization_id=org.id,
+            organization_id=current_user.organization_id,
             name=f"{req.industry} Real Outreach",
             target_industry=req.industry,
             status="active",
@@ -271,16 +316,109 @@ async def find_and_generate_leads(
         campaign.target_industry = req.industry
         await db.flush()
 
+    criteria = criteria.model_copy(update={"campaign_id": campaign.id})
+    run = AgentRun(
+        id=uuid.uuid4(),
+        organization_id=current_user.organization_id,
+        agent_type="lead_pipeline",
+        status="running",
+        started_at=datetime.now(timezone.utc),
+        input_data={
+            "industry": req.industry,
+            "country": req.country,
+            "max_companies": req.max_companies,
+            "campaign_id": str(campaign.id),
+        },
+        triggered_by=str(current_user.id),
+        output_data={"steps": {}, "lead_ids": []},
+    )
+    db.add(run)
+    await db.commit()
 
-    llm = get_llm()
+    # Discovery, enrichment, verification, and persistence.
+    initial_state = get_initial_state(criteria.model_dump())
+    graph = build_hunter_graph(db=db)
+    logger.info("Executing lead pipeline run %s.", run.id)
+    try:
+        async with organization_settings_scope(db, current_user.organization_id):
+            hunter_final = await graph.ainvoke(initial_state)
+    except Exception as exc:
+        safe_error = safe_provider_error("hunter_pipeline", exc)
+        steps = {
+            "discovery": {
+                "status": "failed",
+                "error_type": safe_error.error_type,
+                "message": str(safe_error),
+            },
+            "deduplication": {"status": "skipped", "reason": "discovery_failed"},
+            "people_discovery": {"status": "skipped", "reason": "discovery_failed"},
+            "enrichment": {"status": "skipped", "reason": "discovery_failed"},
+            "verification": {"status": "skipped", "reason": "discovery_failed"},
+            "persistence": {"status": "skipped", "reason": "discovery_failed"},
+            "intelligence": {"status": "skipped", "reason": "discovery_failed"},
+            "scoring": {"status": "skipped", "reason": "discovery_failed"},
+            "draft_generation": {"status": "skipped", "reason": "discovery_failed"},
+        }
+        await _save_pipeline_run(db, run, steps, [], completed=True)
+        raise HTTPException(
+            status_code=502,
+            detail={"run_id": str(run.id), "status": "failed", "steps": steps},
+        ) from exc
 
-    # 3. Extract Website Intelligence for each discovered lead
+    lead_ids = hunter_final.get("lead_ids", [])
+    steps = dict(hunter_final.get("steps", {}))
+    logger.info("Hunter stored %d leads for run %s.", len(lead_ids), run.id)
+
+    if not lead_ids:
+        for stage in ("intelligence", "scoring", "draft_generation"):
+            steps[stage] = {"status": "skipped", "reason": "no_persisted_leads"}
+        await _save_pipeline_run(db, run, steps, lead_ids, completed=True)
+        return {
+            "run_id": str(run.id),
+            "status": run.status,
+            "steps": steps,
+            "lead_count": 0,
+            "draft_count": 0,
+            "leads": [],
+        }
+
+    try:
+        llm = get_llm(
+            await get_organization_settings(db, current_user.organization_id)
+        )
+    except Exception as exc:
+        safe_error = safe_provider_error("llm", exc)
+        steps["intelligence"] = {
+            "status": "failed",
+            "error_type": safe_error.error_type,
+            "message": str(safe_error),
+        }
+        steps["scoring"] = {"status": "skipped", "reason": "llm_unavailable"}
+        steps["draft_generation"] = {"status": "skipped", "reason": "llm_unavailable"}
+        await _save_pipeline_run(db, run, steps, lead_ids, completed=True)
+        raise HTTPException(
+            status_code=503,
+            detail={"run_id": str(run.id), "status": "failed", "steps": steps},
+        ) from exc
+
+    # 3. Extract and persist only evidence returned by the website workflow.
+    intelligence_failures: list[dict[str, str]] = []
+    intelligence_skipped = 0
+    intelligence_saved = 0
     for lid in lead_ids:
         l_res = await db.execute(
-            select(Lead).options(selectinload(Lead.company), selectinload(Lead.person)).where(Lead.id == lid)
+            select(Lead)
+            .options(selectinload(Lead.company), selectinload(Lead.person))
+            .where(
+                Lead.id == lid,
+                Lead.organization_id == current_user.organization_id,
+            )
         )
         lead_obj = l_res.scalars().first()
         if not lead_obj or not lead_obj.company:
+            intelligence_failures.append(
+                {"lead_id": str(lid), "reason": "persisted_lead_or_company_missing"}
+            )
             continue
 
         comp = lead_obj.company
@@ -292,61 +430,53 @@ async def find_and_generate_leads(
 
         if not existing_intel:
             url = comp.website_url or (f"https://{comp.domain}" if comp.domain else None)
-            saved = False
-            if url:
-                try:
-                    fetcher = HttpFetcher(timeout=6.0)
-                    disc = PageDiscoveryService(fetcher)
-                    ext = ContentExtractionService(fetcher)
-                    intel_svc = IntelligenceService(llm)
-                    wi_graph = build_website_intelligence_graph(disc, ext, intel_svc)
-                    wi_state = await wi_graph.ainvoke({
-                        "company_id": comp.id,
-                        "website_url": url,
-                        "errors": []
-                    })
-                    intel_extracted = wi_state.get("extracted_intelligence")
-                    if intel_extracted:
-                        ws_svc = WebsiteService(db)
-                        ws_rec = await ws_svc.get_or_create_website(comp.id, url)
-                        await ws_svc.save_intelligence(comp.id, ws_rec.id, intel_extracted)
-                        saved = True
-                except Exception as exc:
-                    logger.warning("Scrape workflow failed for %s: %s", url, exc)
-
-            # Direct LLM synthesis fallback
-            if not saved:
-                try:
-                    synth_prompt = (
-                        f"Extract structured business profile for:\n"
-                        f"Company: {comp.name}\n"
-                        f"Industry: {comp.industry or req.industry}\n"
-                        f"Domain: {comp.domain}\n"
-                        f"Respond with JSON containing:\n"
-                        f"- services: list of 3-4 specific business offerings\n"
-                        f"- unique_selling_points: list of 2-3 specific competitive advantages\n"
-                        f"- target_market: list of 2-3 specific customer profiles\n"
-                        f"- technology: list of 2-3 digital systems or tools used\n"
-                        f"- locations: list of service areas (e.g. ['{req.country}'])\n"
+            if not url:
+                intelligence_skipped += 1
+                continue
+            try:
+                fetcher = HttpFetcher(timeout=6.0)
+                disc = PageDiscoveryService(fetcher)
+                ext = ContentExtractionService(fetcher)
+                intel_svc = IntelligenceService(llm)
+                wi_graph = build_website_intelligence_graph(disc, ext, intel_svc)
+                wi_state = await wi_graph.ainvoke({
+                    "company_id": comp.id,
+                    "website_url": url,
+                    "errors": [],
+                })
+                intel_extracted = wi_state.get("extracted_intelligence")
+                if not intel_extracted:
+                    intelligence_failures.append(
+                        {"lead_id": str(lid), "reason": "no_intelligence_extracted"}
                     )
-                    resp = await llm.ainvoke([HumanMessage(content=synth_prompt)])
-                    m = re.search(r"\{.*\}", str(resp.content), re.DOTALL)
-                    if m:
-                        p = json.loads(m.group(0))
-                        new_intel = CompanyIntelligence(
-                            company_id=comp.id,
-                            services=p.get("services", [f"Professional {req.industry} service", "Client advisory"]),
-                            unique_selling_points=p.get("unique_selling_points", ["Established local track record", "Full-service management"]),
-                            target_market=p.get("target_market", ["Commercial & individual clients"]),
-                            technology=p.get("technology", ["Online booking", "Digital communications"]),
-                            locations=p.get("locations", [req.country]),
-                            confidence_score=0.88,
-                            pages_analyzed=1
-                        )
-                        db.add(new_intel)
-                        await db.flush()
-                except Exception as exc:
-                    logger.warning("Synthesis fallback failed for %s: %s", comp.name, exc)
+                    continue
+                ws_svc = WebsiteService(db)
+                ws_rec = await ws_svc.get_or_create_website(comp.id, url)
+                await ws_svc.save_intelligence(comp.id, ws_rec.id, intel_extracted)
+                intelligence_saved += 1
+            except Exception as exc:
+                safe_error = safe_provider_error("website_intelligence", exc)
+                logger.warning("Website intelligence failed (%s).", safe_error.error_type)
+                intelligence_failures.append(
+                    {
+                        "lead_id": str(lid),
+                        "reason": str(safe_error),
+                    }
+                )
+        else:
+            intelligence_skipped += 1
+
+    steps["intelligence"] = {
+        "status": (
+            "failed" if intelligence_failures
+            else "succeeded" if intelligence_saved
+            else "skipped"
+        ),
+        "saved_count": intelligence_saved,
+        "skipped_count": intelligence_skipped,
+        "failed_count": len(intelligence_failures),
+        "failures": intelligence_failures,
+    }
 
     await db.commit()
 
@@ -360,13 +490,26 @@ async def find_and_generate_leads(
     v_service = MessageValidationService()
     personalization_graph = build_personalization_graph(db, p_service, v_service)
 
+    scoring_failures: list[dict[str, str]] = []
+    scored_count = 0
+    draft_failures: list[dict[str, str]] = []
+    draft_validation_failures: list[dict[str, str]] = []
+    draft_count = 0
     for lid in lead_ids:
         # A. Score lead
         try:
             score_state = await scoring_graph.ainvoke({"lead_id": lid, "errors": []})
-            logger.info("Scored lead %s: score=%s", lid, score_state.get("total_score"))
-        except Exception as e:
-            logger.warning("Scoring failed for lead %s: %s", lid, e)
+            if score_state.get("total_score") is None or score_state.get("errors"):
+                scoring_failures.append(
+                    {"lead_id": str(lid), "reason": "scoring_workflow_incomplete"}
+                )
+            else:
+                scored_count += 1
+                logger.info("Scored lead %s.", lid)
+        except Exception as exc:
+            safe_error = safe_provider_error("scoring", exc)
+            logger.warning("Scoring failed (%s).", safe_error.error_type)
+            scoring_failures.append({"lead_id": str(lid), "reason": str(safe_error)})
 
         # B. Personalize outreach message
         try:
@@ -376,14 +519,55 @@ async def find_and_generate_leads(
                 "errors": [],
                 "warnings": []
             })
-            logger.info("Personalized message generated for lead %s: msg_id=%s", lid, pers_state.get("message_id"))
-        except Exception as e:
-            logger.warning("Personalization failed for lead %s: %s", lid, e)
+            if pers_state.get("message_id"):
+                draft_count += 1
+                logger.info("Draft persisted for lead %s.", lid)
+                if pers_state.get("errors"):
+                    draft_validation_failures.append(
+                        {"lead_id": str(lid), "reason": "message_validation_failed"}
+                    )
+            else:
+                draft_failures.append(
+                    {"lead_id": str(lid), "reason": "draft_not_persisted"}
+                )
+        except Exception as exc:
+            safe_error = safe_provider_error("draft_generation", exc)
+            logger.warning("Draft generation failed (%s).", safe_error.error_type)
+            draft_failures.append({"lead_id": str(lid), "reason": str(safe_error)})
 
-    await db.commit()
+    steps["scoring"] = {
+        "status": "failed" if scoring_failures else "succeeded",
+        "scored_count": scored_count,
+        "failed_count": len(scoring_failures),
+        "failures": scoring_failures,
+    }
+    steps["draft_generation"] = {
+        "status": "failed" if draft_failures else "succeeded",
+        "draft_count": draft_count,
+        "failed_count": len(draft_failures),
+        "failures": draft_failures,
+    }
+    steps["draft_validation"] = {
+        "status": "failed" if draft_validation_failures else (
+            "succeeded" if draft_count else "skipped"
+        ),
+        "validated_count": draft_count - len(draft_validation_failures),
+        "failed_count": len(draft_validation_failures),
+        "failures": draft_validation_failures,
+    }
 
-    # Return refreshed leads
-    return await list_leads(db)
+    await _save_pipeline_run(db, run, steps, lead_ids, completed=True)
+
+    # Keep the pipeline result shape explicit instead of equating companies with drafts.
+    refreshed_leads = await list_leads(current_user=current_user, db=db)
+    return {
+        "run_id": str(run.id),
+        "status": run.status,
+        "steps": steps,
+        "lead_count": len(lead_ids),
+        "draft_count": draft_count,
+        "leads": refreshed_leads,
+    }
 
 
 
@@ -391,21 +575,38 @@ async def find_and_generate_leads(
 async def send_lead_message(
     message_id: uuid.UUID,
     payload: Optional[MessageApprovalPayload] = None,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """Deliver the generated outreach message live via Resend."""
     stmt = (
         select(Message)
+        .outerjoin(Lead, Lead.id == Message.lead_id)
         .options(
             selectinload(Message.lead).selectinload(Lead.person).selectinload(Person.contacts)
         )
-        .where(Message.id == message_id)
+        .where(
+            Message.id == message_id,
+            Message.organization_id == current_user.organization_id,
+            or_(
+                Message.lead_id.is_(None),
+                Lead.organization_id == current_user.organization_id,
+            ),
+        )
     )
     res = await db.execute(stmt)
     msg = res.scalars().first()
 
     if not msg:
         raise HTTPException(status_code=404, detail="Message not found")
+
+    if msg.status != "approved":
+        raise HTTPException(
+            status_code=409,
+            detail="Message must be explicitly approved before it can be sent.",
+        )
+    if msg.direction != "outbound" or msg.channel != "email":
+        raise HTTPException(status_code=409, detail="Only approved outbound email messages can be sent.")
 
     if payload and payload.edited_subject:
         msg.subject = payload.edited_subject
@@ -421,21 +622,18 @@ async def send_lead_message(
                 break
 
     if not to_email:
-        # Fallback to test email
-        to_email = "delivered@resend.dev"
+        raise HTTPException(status_code=422, detail="Message has no recipient email address.")
 
-    email_provider = get_email_provider()
+    async with organization_settings_scope(db, current_user.organization_id):
+        outreach_service = OutreachService(db, get_email_provider())
     
     try:
-        ext_id = await email_provider.send_email(
-            to_email=to_email,
-            subject=msg.subject,
-            body=msg.body
-        )
-        msg.status = "sent"
-        msg.external_id = ext_id
-        msg.sent_at = datetime.now(timezone.utc)
-        await db.commit()
+        ext_id = await outreach_service.send_message(msg, to_email)
+        if ext_id is None:
+            raise HTTPException(
+                status_code=409,
+                detail="This message has already been claimed for delivery.",
+            )
 
         return {
             "success": True,
@@ -444,6 +642,9 @@ async def send_lead_message(
             "delivered_to": to_email,
             "status": "sent"
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error("Failed to send message live: %s", e)
-        raise HTTPException(status_code=500, detail=f"Failed to send email: {e}")
+        safe_error = safe_provider_error("email_delivery", e)
+        logger.error("Email delivery failed (%s).", safe_error.error_type)
+        raise HTTPException(status_code=502, detail=str(safe_error)) from e

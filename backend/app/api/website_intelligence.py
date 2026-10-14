@@ -18,14 +18,19 @@ from app.services.content_extraction_service import ContentExtractionService
 from app.services.intelligence_service import IntelligenceService
 from app.integrations.website.http_client import HttpFetcher
 from app.workflows.website_intelligence_workflow import build_website_intelligence_graph
+from sqlalchemy import select
+from app.models.company import Company
+from app.models.user import User
+from app.auth import get_current_user
+from app.services.integration_settings_service import get_organization_settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/website-intelligence", tags=["Website Intelligence"])
 
 
-def get_llm():
+def get_llm(settings=None):
     """Factory to return configured LLM."""
-    settings = get_settings()
+    settings = settings or get_settings()
     if settings.LLM_PROVIDER == "groq":
         try:
             from langchain_groq import ChatGroq
@@ -50,9 +55,19 @@ def get_llm():
 async def analyze_website(
     request: WebsiteIntelligenceRequest,
     background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """Trigger website intelligence analysis for a company."""
+
+    company_res = await db.execute(
+        select(Company.id).where(
+            Company.id == request.company_id,
+            Company.organization_id == current_user.organization_id,
+        )
+    )
+    if company_res.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Company not found")
     
     website_service = WebsiteService(db)
     
@@ -86,7 +101,9 @@ async def analyze_website(
     
     discovery = PageDiscoveryService(fetcher)
     extraction = ContentExtractionService(fetcher)
-    intelligence = IntelligenceService(get_llm())
+    intelligence = IntelligenceService(
+        get_llm(await get_organization_settings(db, current_user.organization_id))
+    )
     
     graph = build_website_intelligence_graph(discovery, extraction, intelligence)
     

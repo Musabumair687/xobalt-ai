@@ -10,6 +10,14 @@ from app.services.personalization_service import PersonalizationService
 from app.services.message_validation_service import MessageValidationService
 from app.services.approval_service import ApprovalService
 from app.workflows.personalization_workflow import build_personalization_graph
+from app.models.campaign import Campaign
+from app.models.lead import Lead
+from app.models.message import Message
+from app.models.user import User
+from sqlalchemy import select
+from app.auth import get_current_user
+from app.integrations.provider_errors import safe_provider_error
+from app.services.integration_settings_service import get_organization_settings
 
 try:
     from app.api.website_intelligence import get_llm
@@ -35,11 +43,26 @@ router = APIRouter(prefix="/personalization", tags=["Personalization & Approval"
 async def generate_personalization(
     lead_id: uuid.UUID,
     campaign_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """Trigger the Personalization workflow for a specific lead and campaign."""
+    owned = await db.execute(
+        select(Lead.id, Campaign.id)
+        .join(Campaign, Campaign.id == campaign_id)
+        .where(
+            Lead.id == lead_id,
+            Lead.organization_id == current_user.organization_id,
+            Campaign.organization_id == current_user.organization_id,
+        )
+    )
+    if owned.first() is None:
+        raise HTTPException(status_code=404, detail="Lead or campaign not found")
+
     try:
-        llm = get_llm()
+        llm = get_llm(
+            await get_organization_settings(db, current_user.organization_id)
+        )
     except Exception as e:
         logger.error(f"Failed to load LLM: {e}")
         raise HTTPException(status_code=500, detail="LLM configuration error")
@@ -69,8 +92,9 @@ async def generate_personalization(
         )
         
     except Exception as e:
-        logger.error(f"Error generating personalization: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        safe_error = safe_provider_error("personalization", e)
+        logger.error("Personalization failed (%s).", safe_error.error_type)
+        raise HTTPException(status_code=502, detail=str(safe_error)) from e
 
 
 @router.post(
@@ -81,9 +105,19 @@ async def generate_personalization(
 async def approve_message(
     message_id: uuid.UUID,
     request: ApprovalRequest,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """Process a human approval action for a generated message."""
+    owned_message = await db.execute(
+        select(Message.id).where(
+            Message.id == message_id,
+            Message.organization_id == current_user.organization_id,
+        )
+    )
+    if owned_message.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Message not found")
+
     approval_svc = ApprovalService(db)
     
     try:

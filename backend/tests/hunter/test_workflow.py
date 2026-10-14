@@ -13,6 +13,7 @@ from __future__ import annotations
 import uuid
 import pytest
 from unittest.mock import AsyncMock, patch
+from app.config import Settings
 
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 
@@ -26,6 +27,18 @@ from app.schemas.hunter import (
     VerificationStatus,
 )
 from app.workflows.hunter_workflow import build_hunter_graph, get_initial_state
+
+
+@pytest.fixture(autouse=True)
+def force_explicit_mock_mode(monkeypatch):
+    monkeypatch.setattr(
+        "app.config.get_settings",
+        lambda: Settings(
+            DISCOVERY_PROVIDER="mock",
+            ENRICHMENT_PROVIDER="mock",
+            VERIFICATION_PROVIDER="mock",
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -174,5 +187,7 @@ async def test_workflow_error_tolerance():
         final = await graph.ainvoke(initial)
 
     # Errors are captured, workflow still finishes
-    assert any("discovery_error" in e for e in final.get("errors", []))
+    assert any("Discovery failed" in e for e in final.get("errors", []))
+    assert final["steps"]["discovery"]["status"] == "failed"
+    assert final["steps"]["persistence"]["status"] == "skipped"
     assert isinstance(final["lead_ids"], list)

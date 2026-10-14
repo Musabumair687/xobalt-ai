@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 
 from app.integrations.enrichment.base import EnrichmentProvider
+from app.integrations.provider_errors import ProviderConfigurationError
 from app.schemas.hunter import DiscoveredCompany, DiscoveredPerson
 
 logger = logging.getLogger(__name__)
@@ -66,34 +67,61 @@ class EnrichmentService:
     """Application-level facade for company enrichment and people discovery."""
 
     def __init__(self, provider: EnrichmentProvider | None = None) -> None:
+        self.mode = "injected" if provider is not None else "configured"
+        self.last_operation_skipped = False
         if provider is not None:
             self._provider = provider
             return
 
-        from app.config import get_settings
-        settings = get_settings()
+        from app.services.integration_settings_service import get_runtime_settings
+        settings = get_runtime_settings()
 
-        if settings.APOLLO_API_KEY and settings.ENRICHMENT_PROVIDER in ("auto", "apollo"):
+        selected = settings.ENRICHMENT_PROVIDER.lower().strip()
+        if selected == "mock":
+            self._provider = MockEnrichmentProvider()
+        elif selected == "apollo":
+            if not settings.APOLLO_API_KEY:
+                raise ProviderConfigurationError("Apollo is selected but has no API key.")
             from app.integrations.enrichment.apollo import ApolloEnrichmentProvider
             self._provider = ApolloEnrichmentProvider(api_key=settings.APOLLO_API_KEY)
-        elif settings.HUNTER_API_KEY and settings.ENRICHMENT_PROVIDER in ("auto", "hunter"):
+        elif selected == "hunter":
+            if not settings.HUNTER_API_KEY:
+                raise ProviderConfigurationError("Hunter is selected but has no API key.")
             from app.integrations.enrichment.hunter_enrichment import HunterEnrichmentProvider
             self._provider = HunterEnrichmentProvider(api_key=settings.HUNTER_API_KEY)
+        elif selected == "auto":
+            if settings.APOLLO_API_KEY:
+                from app.integrations.enrichment.apollo import ApolloEnrichmentProvider
+                self._provider = ApolloEnrichmentProvider(api_key=settings.APOLLO_API_KEY)
+            elif settings.HUNTER_API_KEY:
+                from app.integrations.enrichment.hunter_enrichment import HunterEnrichmentProvider
+                self._provider = HunterEnrichmentProvider(api_key=settings.HUNTER_API_KEY)
+            else:
+                raise ProviderConfigurationError(
+                    "Enrichment provider is auto but no real provider is configured; "
+                    "select ENRICHMENT_PROVIDER=mock for mock mode."
+                )
         else:
-            self._provider = MockEnrichmentProvider()
+            raise ProviderConfigurationError(
+                f"Unsupported enrichment provider: {selected or 'empty'}."
+            )
+        self.mode = "mock" if isinstance(self._provider, MockEnrichmentProvider) else "real"
+
+    @property
+    def provider_name(self) -> str:
+        return self._provider.name
 
     async def enrich_company(self, company: DiscoveredCompany) -> DiscoveredCompany:
         """Enrich a company with data from the configured provider.
 
-        Falls back to returning the original company if enrichment fails.
+        Returns the provider result; failures are raised for the workflow to record.
         """
         if not await self._provider.is_available():
-            logger.warning(
-                "EnrichmentProvider '%s' is unavailable – skipping enrichment.",
-                self._provider.name,
-            )
+            self.last_operation_skipped = True
+            logger.warning("Enrichment provider '%s' is unavailable; skipping.", self._provider.name)
             return company
 
+        self.last_operation_skipped = False
         logger.debug("Enriching company '%s' via '%s'.", company.name, self._provider.name)
         return await self._provider.enrich_company(company)
 
@@ -102,15 +130,14 @@ class EnrichmentService:
     ) -> list[DiscoveredPerson]:
         """Find decision makers for *company* matching *roles*.
 
-        Returns an empty list if the provider is unavailable.
+        Provider errors are raised rather than represented as an empty result.
         """
         if not await self._provider.is_available():
-            logger.warning(
-                "EnrichmentProvider '%s' is unavailable – skipping people discovery.",
-                self._provider.name,
-            )
+            self.last_operation_skipped = True
+            logger.warning("Enrichment provider '%s' is unavailable; skipping.", self._provider.name)
             return []
 
+        self.last_operation_skipped = False
         logger.debug(
             "Finding people at '%s' for roles %s via '%s'.",
             company.name,

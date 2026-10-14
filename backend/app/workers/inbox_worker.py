@@ -1,6 +1,7 @@
 """Worker for simulating Inbox checks and triggering the Closer."""
 
 import logging
+import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.conversation_service import ConversationService
 from app.services.conversation_context_service import ConversationContextService
@@ -15,12 +16,23 @@ class InboxWorker:
     def __init__(self, db: AsyncSession):
         self.db = db
         
-    async def process_new_reply(self, sender_email: str, subject: str, content: str):
+    async def process_new_reply(
+        self,
+        sender_email: str,
+        subject: str,
+        content: str,
+        organization_id: uuid.UUID,
+    ):
         """Simulates receiving a webhook from Gmail."""
         conv_service = ConversationService(self.db)
         
         try:
-            msg = await conv_service.process_incoming_email(sender_email, subject, content)
+            msg = await conv_service.process_incoming_email(
+                sender_email,
+                subject,
+                content,
+                organization_id,
+            )
             logger.info(f"Saved message {msg.id}. Triggering Closer workflow.")
             
             # Init LLM services

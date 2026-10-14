@@ -7,6 +7,7 @@ from app.services.availability_service import AvailabilityService
 from app.services.appointment_service import AppointmentService
 from app.services.booking_service import BookingService
 from app.workflows.booking_workflow import build_booking_graph
+from app.services.integration_settings_service import get_runtime_settings
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +17,13 @@ class CalendarWorker:
         
     async def run_booking_workflow(self, state: dict) -> dict:
         """Run the Booking LangGraph workflow."""
+        settings = get_runtime_settings()
+        state["calendar_id"] = settings.GOOGLE_CALENDAR_ID
+        booking_request = state.get("booking_request")
+        if booking_request is not None:
+            state["booking_request"] = booking_request.model_copy(
+                update={"calendar_id": settings.GOOGLE_CALENDAR_ID}
+            )
         cal_svc = CalendarService()
         avail_svc = AvailabilityService()
         appt_svc = AppointmentService(self.db)

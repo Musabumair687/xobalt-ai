@@ -2,10 +2,23 @@
 
 import pytest
 from unittest.mock import AsyncMock
+from app.config import Settings
 
 from app.services.verification_service import VerificationService, MockVerificationProvider
 from app.integrations.verification.base import VerificationProvider
 from app.schemas.hunter import VerificationStatus
+
+
+@pytest.fixture(autouse=True)
+def force_explicit_mock_mode(monkeypatch):
+    monkeypatch.setattr(
+        "app.config.get_settings",
+        lambda: Settings(
+            DISCOVERY_PROVIDER="mock",
+            ENRICHMENT_PROVIDER="mock",
+            VERIFICATION_PROVIDER="mock",
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

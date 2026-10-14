@@ -2,10 +2,23 @@
 
 import pytest
 from unittest.mock import AsyncMock
+from app.config import Settings
 
 from app.services.enrichment_service import EnrichmentService, MockEnrichmentProvider
 from app.integrations.enrichment.base import EnrichmentProvider
 from app.schemas.hunter import DiscoveredCompany, DiscoveredPerson
+
+
+@pytest.fixture(autouse=True)
+def force_explicit_mock_mode(monkeypatch):
+    monkeypatch.setattr(
+        "app.config.get_settings",
+        lambda: Settings(
+            DISCOVERY_PROVIDER="mock",
+            ENRICHMENT_PROVIDER="mock",
+            VERIFICATION_PROVIDER="mock",
+        ),
+    )
 
 
 def _company(name="Test Co", domain="test.com") -> DiscoveredCompany:

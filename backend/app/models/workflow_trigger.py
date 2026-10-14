@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Optional
 from sqlalchemy import String, Integer, DateTime, ForeignKey, JSON
 from sqlalchemy.orm import Mapped, mapped_column
-from backend.app.database.session import Base
+from app.database.base import Base
 
 class WorkflowTrigger(Base):
     __tablename__ = "workflow_triggers"

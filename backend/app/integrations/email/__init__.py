@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 from app.integrations.email.base import EmailProvider
+from app.integrations.provider_errors import ProviderConfigurationError
 
 
 class MockEmailProvider(EmailProvider):
@@ -16,19 +17,24 @@ class MockEmailProvider(EmailProvider):
         return f"mock-{uuid.uuid4().hex[:12]}"
 
 
-def get_email_provider() -> EmailProvider:
+def get_email_provider(settings=None) -> EmailProvider:
     """Instantiate configured email provider based on Settings."""
-    from app.config import get_settings
-    settings = get_settings()
+    if settings is None:
+        from app.services.integration_settings_service import get_runtime_settings
+        settings = get_runtime_settings()
 
-    if settings.RESEND_API_KEY and settings.EMAIL_PROVIDER in ("auto", "resend"):
+    selected = settings.EMAIL_PROVIDER.lower().strip()
+    if selected == "mock":
+        return MockEmailProvider()
+
+    if selected in ("auto", "resend") and settings.RESEND_API_KEY:
         from app.integrations.email.resend_provider import ResendEmailProvider
         return ResendEmailProvider(
             api_key=settings.RESEND_API_KEY,
             default_from_email=settings.RESEND_FROM_EMAIL,
         )
 
-    if settings.SMTP_USER and settings.SMTP_PASSWORD and settings.EMAIL_PROVIDER in ("auto", "smtp"):
+    if selected in ("auto", "smtp") and settings.SMTP_USER and settings.SMTP_PASSWORD:
         from app.integrations.email.smtp_provider import SmtpEmailProvider
         return SmtpEmailProvider(
             host=settings.SMTP_HOST,
@@ -38,4 +44,13 @@ def get_email_provider() -> EmailProvider:
             from_email=settings.SMTP_FROM_EMAIL or settings.SMTP_USER,
         )
 
-    return MockEmailProvider()
+    if selected == "resend":
+        raise ProviderConfigurationError("Resend is selected but has no API key.")
+    if selected == "smtp":
+        raise ProviderConfigurationError("SMTP is selected but is missing credentials.")
+    if selected == "auto":
+        raise ProviderConfigurationError(
+            "Email provider is auto but no real provider is configured; "
+            "select EMAIL_PROVIDER=mock for mock mode."
+        )
+    raise ProviderConfigurationError(f"Unsupported email provider: {selected or 'empty'}.")

@@ -39,7 +39,12 @@ async def test_policy_allow(db_session: AsyncSession):
     db_session.add(contact)
     await db_session.flush()
     
-    lead = Lead(organization_id=org_id, company_id=company.id, person_id=person.id)
+    lead = Lead(
+        organization_id=org_id,
+        company_id=company.id,
+        person_id=person.id,
+        score=80,
+    )
     db_session.add(lead)
     await db_session.flush()
     

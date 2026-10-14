@@ -2,11 +2,25 @@
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
+from app.config import Settings
 
 from app.services.discovery_service import DiscoveryService
 from app.integrations.sources.base import LeadSource
 from app.schemas.hunter import DiscoveredCompany, HunterCriteria
+from app.integrations.provider_errors import ProviderConfigurationError, ProviderRequestError
 import uuid
+
+
+@pytest.fixture(autouse=True)
+def force_explicit_mock_mode(monkeypatch):
+    monkeypatch.setattr(
+        "app.config.get_settings",
+        lambda: Settings(
+            DISCOVERY_PROVIDER="mock",
+            ENRICHMENT_PROVIDER="mock",
+            VERIFICATION_PROVIDER="mock",
+        ),
+    )
 
 
 def _criteria(**kwargs) -> HunterCriteria:
@@ -46,12 +60,13 @@ async def test_discovery_uses_available_source():
 
 
 @pytest.mark.asyncio
-async def test_discovery_skips_unavailable_source():
+async def test_discovery_fails_explicitly_when_selected_source_unavailable():
     source = _make_source("unavailable", False, [])
     svc = DiscoveryService(sources=[source])
 
-    result = await svc.search(_criteria())
-    assert result == []
+    with pytest.raises(ProviderConfigurationError, match="unavailable"):
+        await svc.search(_criteria())
+    assert svc.last_provider_status[0]["status"] == "failed"
     source.search.assert_not_called()
 
 
@@ -76,20 +91,31 @@ async def test_discovery_respects_max_companies():
 
 
 @pytest.mark.asyncio
-async def test_discovery_handles_source_error_gracefully():
+async def test_discovery_provider_error_is_not_empty_success():
     source = AsyncMock(spec=LeadSource)
     source.name = "erroring"
     source.is_available = AsyncMock(return_value=True)
     source.search = AsyncMock(side_effect=RuntimeError("API down"))
     svc = DiscoveryService(sources=[source])
 
-    result = await svc.search(_criteria())
-    assert result == []
+    with pytest.raises(ProviderRequestError):
+        await svc.search(_criteria())
+    assert svc.last_provider_status == [
+        {
+            "provider": "erroring",
+            "status": "failed",
+            "error": "ProviderRequestError",
+            "error_type": "RuntimeError",
+        }
+    ]
 
 
 @pytest.mark.asyncio
-async def test_discovery_default_source_is_mock():
-    """Default SearchSource (mock mode) returns empty list — just verify it doesn't crash."""
+async def test_discovery_empty_mock_result_is_successful_empty_result():
+    """Explicit mock mode may successfully return no candidates."""
     svc = DiscoveryService()
     result = await svc.search(_criteria())
     assert isinstance(result, list)
+    assert result == []
+    assert svc.mode == "mock"
+    assert svc.last_provider_status[0]["status"] == "succeeded"

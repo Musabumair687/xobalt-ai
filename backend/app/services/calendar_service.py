@@ -5,6 +5,7 @@ from typing import List, Optional
 from datetime import datetime
 from app.integrations.calendar.base import CalendarProvider
 from app.integrations.calendar.google_calendar import GoogleCalendarProvider
+from app.integrations.provider_errors import ProviderConfigurationError
 from app.schemas.calendar import TimeSlot, CalendarEvent
 
 logger = logging.getLogger(__name__)
@@ -15,13 +16,40 @@ class CalendarService:
             self.provider = provider
             return
 
-        from app.config import get_settings
-        settings = get_settings()
-        self.provider = GoogleCalendarProvider(
-            refresh_token=settings.GOOGLE_CALENDAR_REFRESH_TOKEN,
-            client_id=settings.GOOGLE_CALENDAR_CLIENT_ID,
-            client_secret=settings.GOOGLE_CALENDAR_CLIENT_SECRET,
-        )
+        from app.services.integration_settings_service import get_runtime_settings
+        settings = get_runtime_settings()
+        selected = settings.CALENDAR_PROVIDER.lower().strip()
+        if selected == "auto":
+            has_google_credentials = all(
+                (
+                    settings.GOOGLE_CALENDAR_REFRESH_TOKEN,
+                    settings.GOOGLE_CALENDAR_CLIENT_ID,
+                    settings.GOOGLE_CALENDAR_CLIENT_SECRET,
+                )
+            )
+            selected = "google" if has_google_credentials else "mock"
+        if selected == "mock":
+            self.provider = GoogleCalendarProvider(simulation=True)
+        elif selected == "google":
+            if not all(
+                (
+                    settings.GOOGLE_CALENDAR_REFRESH_TOKEN,
+                    settings.GOOGLE_CALENDAR_CLIENT_ID,
+                    settings.GOOGLE_CALENDAR_CLIENT_SECRET,
+                )
+            ):
+                raise ProviderConfigurationError(
+                    "Google Calendar is selected but OAuth credentials are incomplete."
+                )
+            self.provider = GoogleCalendarProvider(
+                refresh_token=settings.GOOGLE_CALENDAR_REFRESH_TOKEN,
+                client_id=settings.GOOGLE_CALENDAR_CLIENT_ID,
+                client_secret=settings.GOOGLE_CALENDAR_CLIENT_SECRET,
+            )
+        else:
+            raise ProviderConfigurationError(
+                f"Unsupported calendar provider: {selected or 'empty'}."
+            )
         
     async def get_availability(self, calendar_id: str, start_time: datetime, end_time: datetime) -> List[TimeSlot]:
         """Get busy times."""

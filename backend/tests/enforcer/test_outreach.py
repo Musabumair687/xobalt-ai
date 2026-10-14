@@ -10,7 +10,11 @@ from app.services.outreach_service import OutreachService
 from app.integrations.email.base import EmailProvider
 
 class MockEmailProvider(EmailProvider):
+    def __init__(self):
+        self.calls = 0
+
     async def send_email(self, to_email: str, subject: str, body: str, from_email=None) -> str:
+        self.calls += 1
         if "fail" in to_email:
             raise Exception("Provider temporary failure")
         return "mock-external-id"
@@ -45,6 +49,33 @@ async def test_outreach_send_success(db_session: AsyncSession):
     assert msg.external_id == "mock-external-id"
     assert msg.sent_at is not None
 
+
+@pytest.mark.asyncio
+async def test_outreach_duplicate_attempt_does_not_send_again(db_session: AsyncSession):
+    org_id = uuid.uuid4()
+    msg = Message(
+        organization_id=org_id,
+        channel="email",
+        direction="outbound",
+        status="approved",
+        body="Hello",
+        subject="Subject",
+    )
+    db_session.add(msg)
+    await db_session.commit()
+
+    provider = MockEmailProvider()
+    service = OutreachService(db_session, provider)
+
+    first_result = await service.send_message(msg, "test@test.com")
+    duplicate_result = await service.send_message(msg, "test@test.com")
+
+    assert first_result == "mock-external-id"
+    assert duplicate_result is None
+    assert provider.calls == 1
+    assert msg.status == "sent"
+
+
 @pytest.mark.asyncio
 async def test_outreach_send_failure(db_session: AsyncSession):
     org_id = uuid.uuid4()
@@ -59,4 +90,4 @@ async def test_outreach_send_failure(db_session: AsyncSession):
         await service.send_message(msg, "fail@test.com")
         
     assert msg.status == "failed"
-    assert msg.metadata_["send_error"] == "Provider temporary failure"
+    assert msg.metadata_["send_error"] == "email_delivery request failed (Exception)"

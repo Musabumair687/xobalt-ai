@@ -86,7 +86,16 @@ def build_hunter_graph(
             logger.warning(
                 "Hunter store node: no DB session provided — skipping persistence."
             )
-            return {"lead_ids": [], "warnings": state.get("warnings", []) + ["no_db_session"]}
+            steps = dict(state.get("steps", {}))
+            steps["persistence"] = {
+                "status": "skipped",
+                "reason": "database_session_unavailable",
+            }
+            return {
+                "lead_ids": [],
+                "steps": steps,
+                "warnings": state.get("warnings", []) + ["no_db_session"],
+            }
 
     graph.add_node("store", store_node)
 
@@ -117,4 +126,5 @@ def get_initial_state(criteria_dict: dict) -> HunterState:
         lead_ids=[],
         errors=[],
         warnings=[],
+        steps={},
     )

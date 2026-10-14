@@ -6,6 +6,7 @@ import logging
 import httpx
 
 from app.integrations.enrichment.base import EnrichmentProvider
+from app.integrations.provider_errors import ProviderConfigurationError, safe_provider_error
 from app.schemas.hunter import DiscoveredCompany, DiscoveredPerson
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,9 @@ class HunterEnrichmentProvider(EnrichmentProvider):
         self, company: DiscoveredCompany, roles: list[str]
     ) -> list[DiscoveredPerson]:
         """Find people associated with domain using Hunter.io domain-search."""
-        if not self._api_key or not company.domain:
+        if not self._api_key:
+            raise ProviderConfigurationError("Hunter is selected but has no API key.")
+        if not company.domain:
             return []
 
         params = {
@@ -50,6 +53,7 @@ class HunterEnrichmentProvider(EnrichmentProvider):
         try:
             async with httpx.AsyncClient(timeout=20.0) as client:
                 res = await client.get(f"{self._base_url}/domain-search", params=params)
+                res.raise_for_status()
                 if res.status_code == 200:
                     data = res.json().get("data", {})
                     emails = data.get("emails", [])
@@ -74,15 +78,14 @@ class HunterEnrichmentProvider(EnrichmentProvider):
                             DiscoveredPerson(
                                 first_name=first_name,
                                 last_name=last_name,
-                                title=position,
+                                job_title=position,
                                 email=email,
                                 linkedin_url=linkedin,
-                                company_domain=company.domain,
-                                is_decision_maker=True,
-                                raw_source="hunter",
+                                source="hunter",
                             )
                         )
-        except Exception as e:
-            logger.warning("Hunter.io find_people failed for '%s': %s", company.domain, e)
+        except Exception as exc:
+            logger.warning("Hunter people search failed (%s).", type(exc).__name__)
+            raise safe_provider_error(self.name, exc) from exc
 
         return people

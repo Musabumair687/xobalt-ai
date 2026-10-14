@@ -11,6 +11,7 @@ from app.models.intent_signal import IntentSignal
 from app.models.campaign import Campaign
 from app.schemas.personalization import GeneratedMessage
 from app.agents.personalization.prompts import PERSONALIZATION_PROMPT
+from app.integrations.provider_errors import safe_provider_error
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +76,11 @@ class PersonalizationService:
             result = await structured_llm.ainvoke(prompt_val)
             if result and result.subject:
                 return result
-        except Exception as e:
-            logger.warning("Structured output failed (%s), trying raw JSON prompt", e)
+        except Exception as exc:
+            logger.warning(
+                "Structured message generation failed (%s); trying JSON fallback.",
+                type(exc).__name__,
+            )
 
         # 2. Resilient fallback with direct prompt
         try:
@@ -99,21 +103,11 @@ class PersonalizationService:
                     value_proposition=data.get("value_proposition", "We are connecting with key industry operators to discuss growth partnerships."),
                     cta=data.get("cta", "Would you have a few minutes for a brief introductory call this week?"),
                 )
-        except Exception as e:
-            logger.error("Failed to generate personalization fallback: %s", e)
+        except Exception as exc:
+            logger.error(
+                "Message generation failed (%s).",
+                type(exc).__name__,
+            )
+            raise safe_provider_error("llm", exc) from exc
 
-        # 3. Dynamic contextual fallback based on context facts
-        import re
-        comp_match = re.search(r"Name:\s*([^\n]+)", context_str)
-        comp_name = comp_match.group(1).strip() if comp_match else "your organization"
-
-        person_match = re.search(r"PERSON:\s*\nName:\s*([^\n]+)", context_str)
-        person_name = person_match.group(1).split()[0].strip() if person_match else "there"
-
-        return GeneratedMessage(
-            subject=f"Connecting with {comp_name}",
-            opening=f"Hi {person_name}, I came across {comp_name} while researching leaders in your field.",
-            value_proposition=f"We are exploring strategic collaboration and partnership opportunities with forward-thinking teams like {comp_name}.",
-            cta="Would you be open to a brief introductory conversation this week?",
-        )
-
+        raise RuntimeError("LLM returned no valid structured or JSON message.")

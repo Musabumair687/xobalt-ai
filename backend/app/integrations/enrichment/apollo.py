@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from app.integrations.enrichment.base import EnrichmentProvider
+from app.integrations.provider_errors import ProviderConfigurationError, safe_provider_error
 from app.schemas.hunter import DiscoveredCompany, DiscoveredPerson
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,9 @@ class ApolloEnrichmentProvider(EnrichmentProvider):
 
     async def enrich_company(self, company: DiscoveredCompany) -> DiscoveredCompany:
         """Enrich company details (employee count, industry, description) via Apollo."""
-        if not self._api_key or not company.domain:
+        if not self._api_key:
+            raise ProviderConfigurationError("Apollo is selected but has no API key.")
+        if not company.domain:
             return company
 
         headers = {
@@ -46,6 +49,7 @@ class ApolloEnrichmentProvider(EnrichmentProvider):
                     params={"domain": company.domain},
                     headers=headers,
                 )
+                res.raise_for_status()
                 if res.status_code == 200:
                     data = res.json()
                     org = data.get("organization") or {}
@@ -57,8 +61,9 @@ class ApolloEnrichmentProvider(EnrichmentProvider):
                         company.description = org.get("short_description")
                     if org.get("linkedin_url"):
                         company.linkedin_url = org.get("linkedin_url")
-        except Exception as e:
-            logger.warning("Apollo company enrichment failed for '%s': %s", company.domain, e)
+        except Exception as exc:
+            logger.warning("Apollo company enrichment failed (%s).", type(exc).__name__)
+            raise safe_provider_error(self.name, exc) from exc
 
         return company
 
@@ -66,7 +71,9 @@ class ApolloEnrichmentProvider(EnrichmentProvider):
         self, company: DiscoveredCompany, roles: list[str]
     ) -> list[DiscoveredPerson]:
         """Find decision makers (CEO, Founder, etc.) for this company."""
-        if not self._api_key or not company.domain:
+        if not self._api_key:
+            raise ProviderConfigurationError("Apollo is selected but has no API key.")
+        if not company.domain:
             return []
 
         headers = {
@@ -93,6 +100,7 @@ class ApolloEnrichmentProvider(EnrichmentProvider):
                     json=payload,
                     headers=headers,
                 )
+                res.raise_for_status()
                 if res.status_code == 200:
                     data = res.json()
                     raw_people = data.get("people") or data.get("contacts") or []
@@ -105,6 +113,7 @@ class ApolloEnrichmentProvider(EnrichmentProvider):
                             json=payload,
                             headers=headers,
                         )
+                        res_retry.raise_for_status()
                         if res_retry.status_code == 200:
                             data_retry = res_retry.json()
                             raw_people = data_retry.get("people") or data_retry.get("contacts") or []
@@ -123,15 +132,15 @@ class ApolloEnrichmentProvider(EnrichmentProvider):
                             DiscoveredPerson(
                                 first_name=first_name,
                                 last_name=last_name,
-                                title=title,
+                                job_title=title,
                                 email=email,
                                 linkedin_url=linkedin,
-                                company_domain=company.domain,
-                                is_decision_maker=True,
-                                raw_source="apollo",
+                                source="apollo",
+                                raw_data={"provider_id": p.get("id")},
                             )
                         )
-        except Exception as e:
-            logger.warning("Apollo find_people failed for '%s': %s", company.domain, e)
+        except Exception as exc:
+            logger.warning("Apollo people search failed (%s).", type(exc).__name__)
+            raise safe_provider_error(self.name, exc) from exc
 
         return people

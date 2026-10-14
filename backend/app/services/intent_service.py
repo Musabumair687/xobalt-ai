@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 from langchain_core.language_models.chat_models import BaseChatModel
 from app.models.company_intelligence import CompanyIntelligence
 from app.agents.scoring_intent.prompts import INTENT_PROMPT
+from app.integrations.provider_errors import safe_provider_error
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,6 @@ class IntentService:
                     
             return signals
             
-        except Exception as e:
-            logger.error(f"Intent Extraction failed: {e}")
-            # If LLM fails, return empty gracefully so scoring can continue
-            return []
+        except Exception as exc:
+            logger.error("Intent extraction failed (%s).", type(exc).__name__)
+            raise safe_provider_error("llm_intent", exc) from exc

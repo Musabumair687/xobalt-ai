@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 import httpx
 
 from app.integrations.sources.base import LeadSource
+from app.integrations.provider_errors import ProviderConfigurationError, safe_provider_error
 from app.schemas.hunter import DiscoveredCompany, HunterCriteria
 
 logger = logging.getLogger(__name__)
@@ -31,8 +32,7 @@ class TavilySource(LeadSource):
 
     async def search(self, criteria: HunterCriteria) -> list[DiscoveredCompany]:
         if not self._api_key:
-            logger.warning("TavilySource: no API key configured.")
-            return []
+            raise ProviderConfigurationError("Tavily is selected but has no API key.")
 
         # Formulate query strictly targeting commercial company sites rather than educational articles/guides
         location = criteria.country
@@ -55,9 +55,9 @@ class TavilySource(LeadSource):
                 response = await client.post(url, json=payload)
                 response.raise_for_status()
                 data = response.json()
-        except Exception as e:
-            logger.error("TavilySource HTTP error: %s", e)
-            return []
+        except Exception as exc:
+            logger.error("Tavily request failed (%s).", type(exc).__name__)
+            raise safe_provider_error(self.name, exc) from exc
 
         companies: list[DiscoveredCompany] = []
         seen_domains = set()
@@ -149,4 +149,3 @@ class TavilySource(LeadSource):
                 break
 
         return companies
-

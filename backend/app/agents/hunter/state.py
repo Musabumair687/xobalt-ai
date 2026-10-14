@@ -69,3 +69,6 @@ class HunterState(TypedDict):
 
     warnings: list[str]
     """Advisory messages that don't stop the workflow."""
+
+    steps: dict[str, dict[str, Any]]
+    """Safe per-step execution states, counts, and provider identifiers."""
